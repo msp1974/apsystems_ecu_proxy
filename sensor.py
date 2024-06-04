@@ -1,408 +1,245 @@
+"""Handles sensor entities."""
+
 from __future__ import annotations
 
-from datetime import timedelta, datetime, date
 import logging
-
-import async_timeout
-from homeassistant.helpers.device_registry import DeviceInfo
-from homeassistant.util import dt as dt_util
-from homeassistant.helpers.entity import Entity, EntityCategory
-from homeassistant.helpers.update_coordinator import CoordinatorEntity
-from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.typing import ConfigType, DiscoveryInfoType
-from homeassistant.core import HomeAssistant
 
 from homeassistant.components.sensor import (
     SensorDeviceClass,
     SensorEntity,
     SensorStateClass,
 )
-
-from .const import DOMAIN, SOLAR_ICON, FREQ_ICON, DCVOLTAGE_ICON
+from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import (
-    UnitOfPower,
-    UnitOfEnergy,
-    UnitOfTemperature,
-    UnitOfElectricPotential,
     UnitOfElectricCurrent,
+    UnitOfElectricPotential,
+    UnitOfEnergy,
     UnitOfFrequency,
+    UnitOfPower,
+    UnitOfTemperature,
 )
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers.device_registry import DeviceInfo
+from homeassistant.helpers.entity import EntityCategory
+from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.update_coordinator import CoordinatorEntity
+
+from .const import DOMAIN, SOLAR_ICON
+from .coordinator import APSystemCoordinator
 
 _LOGGER = logging.getLogger(__name__)
 
 
 # ===============================================================================
-async def async_setup_entry(hass, config_entry, add_entities, discovery_info=None):
-    coordinator = hass.data[DOMAIN][config_entry.entry_id].get("coordinator")
-    ecu = coordinator.data
+async def async_setup_entry(
+    hass: HomeAssistant, config_entry: ConfigEntry, add_entities: AddEntitiesCallback
+):
+    """Initialise sensor platform."""
+    coordinator: APSystemCoordinator = hass.data[DOMAIN][config_entry.entry_id][
+        "coordinator"
+    ]
 
-    # instance_attributes = [attr for attr in vars(ecu)]
-    # _LOGGER.warning(f"attributes:{instance_attributes}")
-
-    inverters = coordinator.data.get("inverters", {})
-    ecu_id = coordinator.data.get("ecu-id")
-    # vanaf hier moeten alle gegevens bekend zijn! coordinator.data bevat de volledige datadictionary
-
-    if not coordinator.data:
-        _LOGGER.warning("Tijdelijke dummy data ingezet")
-        coordinator.data = {
-            "timestamp": None,
-            "inverters": {
-                None: {
-                    "uid": None,
-                    "temperature": None,
-                    "frequency": None,
-                    "model": None,
-                    "channel_qty": None,
-                    "power": [None, None],
-                    "voltage": [None, None],
-                    "current": [None, None],
-                }
-            },
-            "ecu-id": None,
-            "lifetime_energy": None,
-            "current_power": None,
-            "qty_of_online_inverters": None,
-        }
-
+    # Add ECU Sensors
     sensors = [
-        APSystemsECUSensor(
-            coordinator,
-            ecu,
-            "current_power",
-            label="Current Power",
-            unit=UnitOfPower.WATT,
-            devclass=SensorDeviceClass.POWER,
-            icon=SOLAR_ICON,
-            stateclass=SensorStateClass.MEASUREMENT,
+        APSystemECUPowerSensor(coordinator, "current_power", "Current Power"),
+        APSystemECUEnergySensor(
+            coordinator, "hourly_energy_production", "Hourly Energy Production"
         ),
-        # added======sensor.py==================================================
-        APSystemsECUSensor(
-            coordinator,
-            ecu,
-            "hourly_energy_production",
-            label="Hourly Energy Production",
-            unit=UnitOfEnergy.KILO_WATT_HOUR,
-            devclass=SensorDeviceClass.ENERGY,
-            icon=SOLAR_ICON,
-            stateclass=SensorStateClass.TOTAL_INCREASING,
+        APSystemECUEnergySensor(
+            coordinator, "daily_energy_production", "Daily Energy Production"
         ),
-        APSystemsECUSensor(
-            coordinator,
-            ecu,
-            "daily_energy_production",
-            label="Daily Energy Production",
-            unit=UnitOfEnergy.KILO_WATT_HOUR,
-            devclass=SensorDeviceClass.ENERGY,
-            icon=SOLAR_ICON,
-            stateclass=SensorStateClass.TOTAL_INCREASING,
+        APSystemECUEnergySensor(
+            coordinator, "lifetime_energy_production", "Lifetime Energy Production"
         ),
-        APSystemsECUSensor(
-            coordinator,
-            ecu,
-            "lifetime_energy_production",
-            label="Lifetime Energy Production",
-            unit=UnitOfEnergy.KILO_WATT_HOUR,
-            devclass=SensorDeviceClass.ENERGY,
-            icon=SOLAR_ICON,
-            stateclass=SensorStateClass.TOTAL_INCREASING,
-        ),
-        # added=================================================================
-        APSystemsECUSensor(
-            coordinator,
-            ecu,
-            "lifetime_energy",
-            label="Lifetime Energy",
-            unit=UnitOfEnergy.KILO_WATT_HOUR,
-            devclass=SensorDeviceClass.ENERGY,
-            icon=SOLAR_ICON,
-            stateclass=SensorStateClass.TOTAL_INCREASING,
-        ),
-        APSystemsECUSensor(
-            coordinator,
-            ecu,
-            "qty_of_online_inverters",
-            label="Inverters Online",
-            icon=SOLAR_ICON,
-            entity_category=EntityCategory.DIAGNOSTIC,
+        APSystemECUEnergySensor(coordinator, "lifetime_energy", "Lifetime Energy"),
+        APSystemsECUBaseSensor(
+            coordinator, "qty_of_online_inverters", "Inverters Online"
         ),
     ]
 
-    if coordinator.data:
-        inverters = coordinator.data.get("inverters", {})
-        for uid, inv_data in inverters.items():
-            _LOGGER.debug(f"Inverter {uid} {inv_data.get('channel_qty')}")
-            if inv_data.get("channel_qty") != None:
-                sensors.extend(
-                    [
-                        APSystemsECUInverterSensor(
-                            coordinator,
-                            ecu,
-                            uid,
-                            "temperature",
-                            label="Temperature",
-                            unit=UnitOfTemperature.CELSIUS,
-                            devclass=SensorDeviceClass.TEMPERATURE,
-                            stateclass=SensorStateClass.MEASUREMENT,
-                            entity_category=EntityCategory.DIAGNOSTIC,
-                        ),
-                        APSystemsECUInverterSensor(
-                            coordinator,
-                            ecu,
-                            uid,
-                            "frequency",
-                            label="Frequency",
-                            unit=UnitOfFrequency.HERTZ,
-                            stateclass=SensorStateClass.MEASUREMENT,
-                            devclass=SensorDeviceClass.FREQUENCY,
-                            icon=FREQ_ICON,
-                            entity_category=EntityCategory.DIAGNOSTIC,
-                        ),
-                    ]
-                )
-                for i in range(0, inv_data.get("channel_qty", 0)):
-                    (
-                        sensors.append(
-                            APSystemsECUInverterSensor(
-                                coordinator,
-                                ecu,
-                                uid,
-                                f"power",
-                                index=i,
-                                label=f"Power Ch {i+1}",
-                                unit=UnitOfPower.WATT,
-                                devclass=SensorDeviceClass.POWER,
-                                icon=SOLAR_ICON,
-                                stateclass=SensorStateClass.MEASUREMENT,
-                            ),
-                        ),
-                    )
-                    (
-                        sensors.append(
-                            APSystemsECUInverterSensor(
-                                coordinator,
-                                ecu,
-                                uid,
-                                "voltage",
-                                index=i,
-                                label=f"Voltage Ch {i+1}",
-                                unit=UnitOfElectricPotential.VOLT,
-                                devclass=SensorDeviceClass.VOLTAGE,
-                                icon=DCVOLTAGE_ICON,
-                                stateclass=SensorStateClass.MEASUREMENT,
-                                entity_category=EntityCategory.DIAGNOSTIC,
-                            ),
-                        ),
-                    )
-                    sensors.append(
-                        APSystemsECUInverterSensor(
-                            coordinator,
-                            ecu,
-                            uid,
-                            "current",
-                            index=i,
-                            label=f"Current Ch {i+1}",
-                            unit=UnitOfElectricCurrent.AMPERE,
-                            devclass=SensorDeviceClass.CURRENT,
-                            icon=DCVOLTAGE_ICON,
-                            stateclass=SensorStateClass.MEASUREMENT,
-                            entity_category=EntityCategory.DIAGNOSTIC,
-                        ),
-                    )
-        add_entities(sensors)
+    # Add Inverter sensors
+    for uid, inverter in coordinator.data.get("inverters").items():
+        sensors.extend(
+            [
+                APSystemInvTemperatureSensor(
+                    coordinator, "temperature", "Temperature", uid
+                ),
+                APSystemInvFrequencySensor(coordinator, "frequency", "Frequency", uid),
+            ]
+        )
+
+        # Add inverter channel sensors
+        for inv_ch in range(inverter.get("channel_qty", 0)):
+            sensors.extend(
+                [
+                    APSystemInvChPowerSensor(
+                        coordinator, "power", "Power", uid, inv_ch
+                    ),
+                    APSystemInvChVoltageSensor(
+                        coordinator, "voltage", "Voltage", uid, inv_ch
+                    ),
+                    APSystemInvChCurrentSensor(
+                        coordinator, "current", "Current", uid, inv_ch
+                    ),
+                ]
+            )
+
+    add_entities(sensors)
 
 
-class APSystemsECUInverterSensor(CoordinatorEntity, SensorEntity):
-    def __init__(
-        self,
-        coordinator,
-        ecu,
-        uid,
-        field,
-        index=0,
-        label=None,
-        icon=None,
-        unit=None,
-        devclass=None,
-        stateclass=None,
-        entity_category=None,
-    ):
+class APSystemsECUBaseSensor(CoordinatorEntity, SensorEntity):
+    """Base APSystems sensor class."""
+
+    _attr_has_entity_name = True
+
+    def __init__(self, coordinator, parameter: str, name: str) -> None:
+        """Initialise sensor."""
         super().__init__(coordinator)
-        self.coordinator = coordinator
-        self._index = index
-        self._uid = uid
-        self._ecu = self.coordinator.data.get("ecu-id")
-        self._field = field
-        self._devclass = devclass
-        self._label = label
-        if not label:
-            self._label = field
-        self._icon = icon
-        self._unit = unit
-        self._stateclass = stateclass
-        self._entity_category = entity_category
-        self._name = f"Inverter {self._uid} {self._label}"
-        self._state = None
-        self._inverter = self.coordinator.data.get("inverters", {}).get(self._uid, {})
+        self.data = coordinator.data
+        self._name = name
+        self.parameter = parameter
 
     @property
     def unique_id(self):
-        field = self._field
-        if self._index != None:
-            field = f"{field}_{self._index}"
-        return f"{self._ecu}_{self._uid}_{field}"
-
-    @property
-    def device_class(self):
-        return self._devclass
+        """Return unique id."""
+        return f"{self.data.get("ecu-id")}_{self.parameter}"
 
     @property
     def name(self):
+        """Return name."""
         return self._name
 
     @property
-    def state(self):
-        # _LOGGER.debug(f"State called for {self._field}")
-        try:
-            match self._field:
-                case "voltage":
-                    return (
-                        self.coordinator.data.get("inverters", {})
-                        .get(self._uid, {})
-                        .get("voltage", [])[self._index]
-                    )
-                case "power":
-                    return (
-                        self.coordinator.data.get("inverters", {})
-                        .get(self._uid, {})
-                        .get("power", [])[self._index]
-                    )
-                case "current":
-                    return (
-                        self.coordinator.data.get("inverters", {})
-                        .get(self._uid, {})
-                        .get("current", [])[self._index]
-                    )
-                case _:
-                    return (
-                        self.coordinator.data.get("inverters", {})
-                        .get(self._uid, {})
-                        .get(self._field)
-                    )
-        except Exception:
-            pass
+    def native_value(self):
+        """Return native value."""
+        return self.coordinator.data.get(self.parameter)
 
     @property
-    def icon(self):
-        return self._icon
-
-    @property
-    def unit_of_measurement(self):
-        return self._unit
+    def device_info(self) -> DeviceInfo:
+        """Return device info."""
+        return DeviceInfo(identifiers={(DOMAIN, f"ecu_{self.data.get("ecu-id")}")})
 
     @property
     def extra_state_attributes(self):
-        attrs = {
-            "ecu_id": f"{self._ecu}",
+        """Return extra attributes."""
+        return {
+            "ecu_id": f"{self.data.get("ecu-id")}",
             "last_update": f"{self.coordinator.data.get('timestamp')}",
         }
-        return attrs
-
-    @property
-    def state_class(self):
-        # _LOGGER.debug(f"State class {self._stateclass} - {self._field}")
-        return self._stateclass
-
-    @property
-    def device_info(self):
-        parent = f"inverter_{self._uid}"
-        return {
-            "identifiers": {
-                (DOMAIN, parent),
-            }
-        }
-
-    @property
-    def entity_category(self):
-        return self._entity_category
 
 
-class APSystemsECUSensor(CoordinatorEntity, SensorEntity):
+class APSystemsInvBaseSensor(APSystemsECUBaseSensor):
+    """Inverter channel base class."""
+
     def __init__(
         self,
         coordinator,
-        ecu,
-        field,
-        label=None,
-        icon=None,
-        unit=None,
-        devclass=None,
-        stateclass=None,
-        entity_category=None,
-    ):
-        super().__init__(coordinator)
-        self.coordinator = coordinator
-        # Hier worden de basis gegevens van de integratie (device info weergegeven)
-        self._ecu = self.coordinator.data.get("ecu-id")
-        self._field = field
-        self._label = label
-        if not label:
-            self._label = field
-        self._icon = icon
-        self._unit = unit
-        self._devclass = devclass
-        self._stateclass = stateclass
-        self._entity_category = entity_category
-        self._name = f"ECU {self._label}"
-        self._state = None
+        parameter: str,
+        name: str,
+        inverter_uid: str,
+        inv_ch: int | None = None,
+    ) -> None:
+        """Initialise."""
+        super().__init__(coordinator, parameter, name)
+        self.inv_uid = inverter_uid
+        self.inv_ch = inv_ch
 
     @property
     def unique_id(self):
-        return f"{self._ecu}_{self._field}"
+        """Return unique id."""
+        return (
+            f"{self.data.get("ecu-id")}_{self.inv_uid}_{self.parameter}_{self.inv_ch}"
+            if self.inv_ch is not None
+            else f"{self.data.get("ecu-id")}_{self.inv_uid}_{self.parameter}"
+        )
 
     @property
     def name(self):
-        return self._name
+        """Return name."""
+        return (
+            f"{self._name} Ch {self.inv_ch + 1}"
+            if self.inv_ch is not None
+            else self._name
+        )
 
     @property
-    def device_class(self):
-        return self._devclass
+    def native_value(self):
+        """Return native value."""
+        return (
+            self.coordinator.data.get("inverters", {})
+            .get(self.inv_uid, {})
+            .get(self.parameter, [])[self.inv_ch]
+            if self.inv_ch is not None
+            else self.coordinator.data.get("inverters", {})
+            .get(self.inv_uid, {})
+            .get(self.parameter)
+        )
 
     @property
-    def state(self):
-        # _LOGGER.debug(f"State called for {self._field}")
-        return self.coordinator.data.get(self._field)
+    def device_info(self) -> DeviceInfo:
+        """Return device info."""
+        return DeviceInfo(identifiers={(DOMAIN, f"inverter_{self.inv_uid}")})
 
-    @property
-    def icon(self):
-        return self._icon
 
-    @property
-    def unit_of_measurement(self):
-        return self._unit
+class APSystemECUPowerSensor(APSystemsECUBaseSensor):
+    """ECU Power sensor."""
 
-    @property
-    def extra_state_attributes(self):
-        attrs = {
-            "ecu_id": f"{self._ecu}",
-            "last_update": f"{self.coordinator.data.get('timestamp')}",
-        }
-        return attrs
+    _attr_native_unit_of_measurement = UnitOfPower.WATT
+    _attr_device_class = SensorDeviceClass.POWER
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_icon = SOLAR_ICON
 
-    @property
-    def state_class(self):
-        # _LOGGER.debug(f"State class {self._stateclass} - {self._field}")
-        return self._stateclass
 
-    @property
-    def device_info(self):
-        parent = f"ecu_{self._ecu}"
-        return {
-            "identifiers": {
-                (DOMAIN, parent),
-            }
-        }
+class APSystemECUEnergySensor(APSystemsECUBaseSensor):
+    """ECU Energy sensor."""
 
-    @property
-    def entity_category(self):
-        return self._entity_category
+    _attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
+    _attr_device_class = SensorDeviceClass.ENERGY
+    _attr_state_class = SensorStateClass.TOTAL_INCREASING
+    _attr_icon = SOLAR_ICON
+
+
+class APSystemInvFrequencySensor(APSystemsInvBaseSensor):
+    """Frequency sensor."""
+
+    _attr_native_unit_of_measurement = UnitOfFrequency.HERTZ
+    _attr_device_class = SensorDeviceClass.FREQUENCY
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+
+class APSystemInvTemperatureSensor(APSystemsInvBaseSensor):
+    """Temperature sensor."""
+
+    _attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS
+    _attr_device_class = SensorDeviceClass.TEMPERATURE
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+
+# Inverter channel classes
+class APSystemInvChVoltageSensor(APSystemsInvBaseSensor):
+    """Voltage sensor."""
+
+    _attr_native_unit_of_measurement = UnitOfElectricPotential.VOLT
+    _attr_device_class = SensorDeviceClass.VOLTAGE
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+
+class APSystemInvChCurrentSensor(APSystemsInvBaseSensor):
+    """Current sensor."""
+
+    _attr_native_unit_of_measurement = UnitOfElectricCurrent.AMPERE
+    _attr_device_class = SensorDeviceClass.CURRENT
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+
+class APSystemInvChPowerSensor(APSystemsInvBaseSensor):
+    """Power sensor."""
+
+    _attr_native_unit_of_measurement = UnitOfPower.WATT
+    _attr_device_class = SensorDeviceClass.POWER
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_icon = SOLAR_ICON
