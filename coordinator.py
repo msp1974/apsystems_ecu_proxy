@@ -15,7 +15,7 @@ from .const import MESSAGE_EVENT, SOCKET_PORTS
 _LOGGER = logging.getLogger(__name__)
 
 
-class PushExampleCoordinator(DataUpdateCoordinator):
+class APSystemCoordinator(DataUpdateCoordinator):
     """My example coordinator."""
 
     def __init__(self, hass: HomeAssistant, config_entry: ConfigEntry) -> None:

@@ -8,7 +8,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers import device_registry as dr
 
 from .const import DOMAIN, MESSAGE_EVENT
-from .coordinator import PushExampleCoordinator
+from .coordinator import APSystemCoordinator
 
 _LOGGER = logging.getLogger(__name__)
 PLATFORMS = ["sensor"]
@@ -23,7 +23,7 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry):
 
     hass.data.setdefault(DOMAIN, {})
 
-    coordinator = PushExampleCoordinator(hass, config_entry)
+    coordinator = APSystemCoordinator(hass, config_entry)
     config_entry.async_create_background_task(
         hass, coordinator.setup_socket_servers(), "Init Socket Servers"
     )
