@@ -82,7 +82,6 @@ class MySocketAPI:
                 return
             try:
                 message = data.decode("utf-8")
-                _LOGGER.debug("Message: %s", message)
                 # process data
                 if message[0:7] == "APS18AA":
                     # analyse valid data strings by using the checksum and exit when invalid
@@ -103,6 +102,8 @@ class MySocketAPI:
                     ecu["ecu-id"] = message[18:30]
                     ecu["model"] = self.get_model(message[18:22])
                     ecu["lifetime_energy"] = int(message[42:60]) / 10
+                    ecu["daily_energy"] = 0
+                    ecu["lifetime_energy_production"] = 0
                     ecu["current_power"] = int(message[30:42]) / 100
                     ecu["qty_of_online_inverters"] = int(message[74:77])
                     ecu["inverters"] = self.get_inverters(message)
@@ -141,7 +142,7 @@ class MySocketAPI:
                     """
 
                     # Call callback to send the data
-                    await self.callback(ecu)
+                    self.callback(ecu)
             except Exception:
                 _LOGGER.warning("Exception error with %s", traceback.format_exc())
                 return None

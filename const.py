@@ -1,9 +1,5 @@
 """Constants."""
 
-from dataclasses import dataclass
-from enum import StrEnum
-
-
 DOMAIN = "apsystems_ecu_proxy"
 
 

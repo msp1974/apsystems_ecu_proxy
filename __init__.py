@@ -24,43 +24,11 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry):
     hass.data.setdefault(DOMAIN, {})
 
     coordinator = APSystemCoordinator(hass, config_entry)
-    config_entry.async_create_background_task(
-        hass, coordinator.setup_socket_servers(), "Init Socket Servers"
-    )
+    await coordinator.setup_socket_servers()
+
     hass.data[DOMAIN][config_entry.entry_id] = {"coordinator": coordinator}
 
-    async def _async_complete_setup(self):
-        """Complete setup of integration."""
-
-        # Register the ECU device
-        device_registry = dr.async_get(hass)
-        device_registry.async_get_or_create(
-            config_entry_id=config_entry.entry_id,
-            identifiers={(DOMAIN, f"ecu_{coordinator.data.get('ecu-id')}")},
-            manufacturer="APSystems",
-            suggested_area="Roof",
-            name=f"ECU {coordinator.data.get('ecu-id')}",
-            model=f"{coordinator.data.get('model')}",
-        )
-
-        # Register the Inverter devices
-        inverters = coordinator.data.get("inverters", {})
-        for uid, inv_data in inverters.items():
-            device_registry.async_get_or_create(
-                config_entry_id=config_entry.entry_id,
-                identifiers={(DOMAIN, f"inverter_{uid}")},
-                manufacturer="APSystems",
-                suggested_area="Roof",
-                name=f"Inverter {uid}",
-                model=inv_data.get("model"),
-            )
-
-        await hass.config_entries.async_forward_entry_setups(config_entry, PLATFORMS)
-        _LOGGER.warning("Data received")
-        return True
-
-    # Now we need to wait until we get a socket message before continuing setup.
-    hass.bus.async_listen_once(MESSAGE_EVENT, _async_complete_setup)
+    await hass.config_entries.async_forward_entry_setups(config_entry, PLATFORMS)
     return True
 
 
