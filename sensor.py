@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from dataclasses import dataclass
-from enum import StrEnum
 import logging
 from typing import Any
 
@@ -12,7 +10,7 @@ from homeassistant.components.sensor import (
     RestoreSensor,
     SensorDeviceClass,
     SensorEntity,
-    SensorEntityDescription,
+    SensorStateClass,
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import (
@@ -29,128 +27,126 @@ from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN, SOLAR_ICON
-from .coordinator import APSystemCoordinator
 
 _LOGGER = logging.getLogger(__name__)
 
 
-class SensorClass(StrEnum):
-    """Sensor class enum."""
-
-    ECU = "ecu"
-    INVERTER = "inverter"
-
-
 @dataclass
-class SensorExtraData:
-    """Class to hold data passed to sensor class."""
+class APSystemSensorConfig:
+    """Class for a sensor config."""
 
-    sensor_class: SensorClass
-    ecu_id: str
-    parameter: str
-    inverter_id: str | None = None
-    inverter_channel: int | None = None
-    model: str | None = None
+    unique_id: str | None = None
+    name: str | None = None
+    device_identifier: str | None = None
+    initial_value: str | None = None
+    display_uom: str | None = None
+    display_precision: int | None = None
 
 
 @dataclass(frozen=True, kw_only=True)
-class APSystemSensorEntityDescription(SensorEntityDescription):
-    """A class that describes APSystem sensor entities."""
+class APSystemSensorDefinition:
+    """Class for sensor definition."""
 
-    sensor_class: str | None = None
-    name_fn: Callable | None = None
-    unique_id: str | None = None
+    name: str
+    icon: str | None = None
+    parameter: str | None = None
+    device_class: SensorDeviceClass | None = None
+    state_class: SensorStateClass | None = None
+    unit_of_measurement: str | None = None
+    entity_category: EntityCategory | None = None
 
 
-# Here we define our sensors using EntityDescritions
-ECU_SENSORS: tuple[APSystemSensorEntityDescription, ...] = (
-    APSystemSensorEntityDescription(
-        key="current_power",
+ECU_SENSORS: tuple[APSystemSensorDefinition, ...] = (
+    APSystemSensorDefinition(
         name="Current Power",
         icon=SOLAR_ICON,
-        sensor_class=SensorClass.ECU,
+        parameter="current_power",
         device_class=SensorDeviceClass.POWER,
-        native_unit_of_measurement=UnitOfPower.WATT,
+        unit_of_measurement=UnitOfPower.WATT,
     ),
-    APSystemSensorEntityDescription(
-        key="hourly_energy_production",
+    APSystemSensorDefinition(
         name="Hourly Energy Production",
         icon=SOLAR_ICON,
-        sensor_class=SensorClass.ECU,
+        parameter="hourly_energy_production",
         device_class=SensorDeviceClass.ENERGY,
-        native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
+        state_class=SensorStateClass.TOTAL_INCREASING,
+        unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
     ),
-    APSystemSensorEntityDescription(
-        key="daily_energy_production",
+    APSystemSensorDefinition(
         name="Daily Energy Production",
         icon=SOLAR_ICON,
-        sensor_class=SensorClass.ECU,
+        parameter="daily_energy_production",
         device_class=SensorDeviceClass.ENERGY,
-        native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
+        state_class=SensorStateClass.TOTAL_INCREASING,
+        unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
     ),
-    APSystemSensorEntityDescription(
-        key="lifetime_energy_production",
+    APSystemSensorDefinition(
         name="Lifetime Energy Production",
         icon=SOLAR_ICON,
-        sensor_class=SensorClass.ECU,
+        parameter="lifetime_energy_production",
         device_class=SensorDeviceClass.ENERGY,
-        native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
+        state_class=SensorStateClass.TOTAL_INCREASING,
+        unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
     ),
-    APSystemSensorEntityDescription(
-        key="lifetime_energy",
+    APSystemSensorDefinition(
         name="Lifetime Energy",
         icon=SOLAR_ICON,
-        sensor_class=SensorClass.ECU,
+        parameter="lifetime_energy",
         device_class=SensorDeviceClass.ENERGY,
-        native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
+        state_class=SensorStateClass.TOTAL_INCREASING,
+        unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
     ),
-    APSystemSensorEntityDescription(
-        key="qty_of_online_inverters",
+    APSystemSensorDefinition(
         name="Inverters Online",
-        sensor_class=SensorClass.ECU,
+        parameter="qty_of_online_inverters",
+    ),
+    APSystemSensorDefinition(
+        name="Last Update",
+        parameter="timestamp",
+        device_class=SensorDeviceClass.TIMESTAMP,
     ),
 )
 
-INVERTER_SENSORS: tuple[APSystemSensorEntityDescription, ...] = (
-    APSystemSensorEntityDescription(
-        key="temperature",
+
+INVERTER_SENSORS: tuple[APSystemSensorDefinition, ...] = (
+    APSystemSensorDefinition(
         name="Temperature",
+        parameter="temperature",
         device_class=SensorDeviceClass.TEMPERATURE,
-        native_unit_of_measurement=UnitOfTemperature.CELSIUS,
+        unit_of_measurement=UnitOfTemperature.CELSIUS,
         entity_category=EntityCategory.DIAGNOSTIC,
     ),
-    APSystemSensorEntityDescription(
-        key="frequency",
+    APSystemSensorDefinition(
         name="Frequency",
+        parameter="frequency",
         device_class=SensorDeviceClass.FREQUENCY,
-        native_unit_of_measurement=UnitOfFrequency.HERTZ,
+        unit_of_measurement=UnitOfFrequency.HERTZ,
         entity_category=EntityCategory.DIAGNOSTIC,
     ),
 )
 
-INVERTER_CHANNEL_SENSORS: tuple[APSystemSensorEntityDescription, ...] = (
-    APSystemSensorEntityDescription(
-        key="power",
-        name_fn=lambda c: f"Power Ch {c}",
+INVERTER_CHANNEL_SENSORS: tuple[APSystemSensorDefinition, ...] = (
+    APSystemSensorDefinition(
+        name="Power",
+        parameter="power",
         device_class=SensorDeviceClass.POWER,
-        native_unit_of_measurement=UnitOfPower.WATT,
+        unit_of_measurement=UnitOfPower.WATT,
         entity_category=EntityCategory.DIAGNOSTIC,
     ),
-    APSystemSensorEntityDescription(
-        key="voltage",
-        name_fn=lambda c: f"Voltage Ch {c}",
+    APSystemSensorDefinition(
+        name="Voltage",
+        parameter="voltage",
         device_class=SensorDeviceClass.VOLTAGE,
-        native_unit_of_measurement=UnitOfElectricPotential.VOLT,
+        unit_of_measurement=UnitOfElectricPotential.VOLT,
         entity_category=EntityCategory.DIAGNOSTIC,
     ),
-    APSystemSensorEntityDescription(
-        key="current",
-        name_fn=lambda c: f"Current Ch {c}",
+    APSystemSensorDefinition(
+        name="Current",
+        parameter="current",
         device_class=SensorDeviceClass.CURRENT,
-        native_unit_of_measurement=UnitOfElectricCurrent.AMPERE,
+        unit_of_measurement=UnitOfElectricCurrent.AMPERE,
         entity_category=EntityCategory.DIAGNOSTIC,
     ),
 )
@@ -161,11 +157,6 @@ async def async_setup_entry(
     hass: HomeAssistant, config_entry: ConfigEntry, add_entities: AddEntitiesCallback
 ):
     """Initialise sensor platform."""
-    coordinator: APSystemCoordinator = hass.data[DOMAIN][config_entry.entry_id][
-        "coordinator"
-    ]
-
-    # Restore all previously registered entities
 
     def get_device_entry(device_id):
         """Get device entry by device id."""
@@ -178,89 +169,6 @@ async def async_setup_entry(
         except IndexError:
             return
 
-    def get_restore_sensor(entry: er.RegistryEntry):
-        """Restore an individual entity."""
-
-        if entry.domain != "sensor" or entry.disabled_by:
-            return
-
-        # We use the unique id to get the sensor type, ecu-id, inverter uid and channel
-        # to pass to our entity class.
-        unique_id_params = entry.unique_id.split("-")
-
-        if len(unique_id_params) < 3:
-            # This is using the old unique id format and needs migrating.
-            _LOGGER.debug(
-                "Old unique id - need to migrate - %s : %s",
-                entry.entity_id,
-                entry.unique_id,
-            )
-            coordinator.migration_required = True
-            return
-
-        # Set the extra data to pass to the sensor by splittign unique_id
-        # This is so that we can send same data structure for update data
-        # from the actual device.
-
-        # Get device model from the previously registered device.
-        # We need to do this as no other way to get it on a restored entity
-        # for device info on the entity.
-        if device := get_device_entry(entry.device_id):
-            device_model = device.model
-        else:
-            device_model = "Unknown"
-
-        # Create the entity extra data with the info itneeds to get its value
-        # when it receives some ECU data.
-        if unique_id_params[0] == SensorClass.ECU:
-            extra_data = SensorExtraData(
-                sensor_class=unique_id_params[0],
-                ecu_id=unique_id_params[1],
-                parameter=unique_id_params[2],
-                model=device_model,
-            )
-        else:
-            extra_data = SensorExtraData(
-                sensor_class=unique_id_params[0],
-                ecu_id=unique_id_params[1],
-                parameter=unique_id_params[3],
-                inverter_id=unique_id_params[2],
-                inverter_channel=unique_id_params[4]
-                if len(unique_id_params) == 5
-                else None,
-                model=device_model,
-            )
-
-        # Create entity description for restored sensor entity
-        entity_description = APSystemSensorEntityDescription(
-            key=extra_data.parameter,
-            sensor_class=extra_data.sensor_class,
-            device_class=entry.device_class or entry.original_device_class,
-            icon=entry.original_icon,
-            name=entry.original_name,
-            unique_id=entry.unique_id,
-            native_unit_of_measurement=entry.unit_of_measurement,
-            entity_category=entry.entity_category,
-            unit_of_measurement=entry.options.get("sensor", {}).get(
-                "unit_of_measurement"
-            ),
-            suggested_display_precision=entry.options.get("sensor", {}).get(
-                "display_precision"
-            ),
-        )
-
-        # Define which sensor class to use to create the sensor.
-        if extra_data.sensor_class == SensorClass.INVERTER:
-            if extra_data.inverter_channel is not None:
-                sensor_class = APSystemsInverterChannelSensor
-            else:
-                sensor_class = APSystemsInverterSensor
-        else:
-            sensor_class = APSystemsSensor
-
-        # Return sensor
-        return sensor_class(coordinator, entity_description, config_entry, extra_data)
-
     def restore_sensors():
         """Restore all previsouly registered sensors."""
         sensors = []
@@ -271,74 +179,24 @@ async def async_setup_entry(
         )
 
         for entry in entries:
-            if sensor := get_restore_sensor(entry):
-                sensors.append(sensor)  # noqa: PERF401
+            if device := get_device_entry(entry.device_id):
+                definition = APSystemSensorDefinition(
+                    name=entry.original_name,
+                    icon=entry.original_icon,
+                    device_class=entry.device_class or entry.original_device_class,
+                    unit_of_measurement=entry.unit_of_measurement,
+                    entity_category=entry.entity_category,
+                )
 
-        if sensors:
-            add_entities(sensors)
+                config = APSystemSensorConfig(
+                    unique_id=entry.unique_id,
+                    device_identifier=device.identifiers,
+                    display_uom=entry.options.get("sensor", {}).get(
+                        "unit_of_measurement"
+                    ),
+                )
 
-    @callback
-    def handle_migration(data):
-        """Handle migration of unique ids.
-
-        This will run if entities have old unique ids only on
-        first data received after startuo.
-        """
-
-        sensors = []
-
-        # Get entity registry
-        entity_registry = er.async_get(hass)
-        entries = er.async_entries_for_config_entry(
-            entity_registry, config_entry.entry_id
-        )
-        # Migrate ECU sensors
-        for sensor in ECU_SENSORS:
-            for entry in entries:
-                if entry.domain != "sensor" or entry.disabled_by:
-                    continue
-
-                if entry.unique_id == f"{data.get('ecu-id')}_{sensor.key}":
-                    _LOGGER.debug("Migrating: %s", entry.original_name)
-                    new_entry = entity_registry.async_update_entity(
-                        entry.entity_id,
-                        new_unique_id=f"{SensorClass.ECU}-{data.get('ecu-id')}-{sensor.key}",
-                    )
-                    sensors.append(get_restore_sensor(new_entry))
-
-        # Migrate Inverter sensors
-        for uid, inverter in data.get("inverters").items():
-            for sensor in INVERTER_SENSORS:
-                for entry in entries:
-                    if entry.domain != "sensor" or entry.disabled_by:
-                        continue
-
-                    if entry.unique_id == f"{data.get('ecu-id')}_{uid}_{sensor.key}":
-                        _LOGGER.debug("Migrating: %s", entry.original_name)
-                        new_entry = entity_registry.async_update_entity(
-                            entry.entity_id,
-                            new_unique_id=f"{SensorClass.INVERTER}-{data.get('ecu-id')}-{uid}-{sensor.key}",
-                        )
-                        sensors.append(get_restore_sensor(new_entry))
-
-            # Inverter channels
-            for sensor in INVERTER_CHANNEL_SENSORS:
-                for channel in range(inverter.get("channel_qty", 0)):
-                    for entry in entries:
-                        if entry.domain != "sensor" or entry.disabled_by:
-                            continue
-
-                        if (
-                            entry.unique_id
-                            == f"{data.get('ecu-id')}_{uid}_{sensor.key}_{channel}"
-                        ):
-                            _LOGGER.debug("Migrating: %s", entry.original_name)
-                            new_entry: er.RegistryEntry = entity_registry.async_update_entity(
-                                entry.entity_id,
-                                new_unique_id=f"{SensorClass.INVERTER}-{data.get('ecu-id')}-{uid}-{sensor.key}-{channel}",
-                            )
-
-                            sensors.append(get_restore_sensor(new_entry))
+                sensors.append(APSystemsSensor(definition, config))
 
         if sensors:
             add_entities(sensors)
@@ -351,16 +209,29 @@ async def async_setup_entry(
         # So, create all sensors described in ECU_SENSORS
 
         _LOGGER.debug("Registering new ECU: %s", data)
+
+        ecu_id = data.get("ecu-id")
+        device_identifiers = {(DOMAIN, f"ecu_{ecu_id}")}
+
+        # Create device
+        device_registry = dr.async_get(hass)
+        device_registry.async_get_or_create(
+            config_entry_id=config_entry.entry_id,
+            identifiers=device_identifiers,
+            manufacturer="APSystems",
+            suggested_area="Roof",
+            name=f"ECU {ecu_id}",
+            model=f"{data.get('model')}",
+        )
+
         sensors = []
         for sensor in ECU_SENSORS:
-            extra_data = SensorExtraData(
-                sensor_class=SensorClass.ECU,
-                ecu_id=data.get("ecu-id"),
-                parameter=sensor.key,
+            config = APSystemSensorConfig(
+                unique_id=f"{ecu_id}_{sensor.parameter}",
+                device_identifier=device_identifiers,
+                initial_value=data.get(sensor.parameter),
             )
-            sensors.append(
-                APSystemsSensor(coordinator, sensor, config_entry, extra_data)
-            )
+            sensors.append(APSystemsSensor(sensor, config))
         add_entities(sensors)
 
     @callback
@@ -372,34 +243,41 @@ async def async_setup_entry(
         # INVERTER_CHANNEL_SENSORS
 
         _LOGGER.debug("Registering New Inverter: %s", data)
-        # Add Inverter sensors
+
+        ecu_id = data.get("ecu-id")
+        uid = data.get("uid")
+        device_identifiers = {(DOMAIN, f"inverter_{uid}")}
+
+        # Create device
+        device_registry = dr.async_get(hass)
+        device_registry.async_get_or_create(
+            config_entry_id=config_entry.entry_id,
+            identifiers=device_identifiers,
+            manufacturer="APSystems",
+            suggested_area="Roof",
+            name=f"Inverter {data.get('uid')}",
+            model=f"{data.get('model')}",
+        )
+
         sensors = []
         for sensor in INVERTER_SENSORS:
-            extra_data = SensorExtraData(
-                sensor_class=SensorClass.INVERTER,
-                ecu_id=data.get("ecu-id"),
-                parameter=sensor.key,
-                inverter_id=data.get("uid"),
+            config = APSystemSensorConfig(
+                unique_id=f"{ecu_id}_{uid}_{sensor.parameter}",
+                device_identifier=device_identifiers,
+                initial_value=data.get(sensor.parameter),
             )
-            sensors.append(
-                APSystemsInverterSensor(coordinator, sensor, config_entry, extra_data)
-            )
+            sensors.append(APSystemsSensor(sensor, config))
 
         # Add Inverter channel sensors
         for channel in range(data.get("channel_qty", 0)):
             for sensor in INVERTER_CHANNEL_SENSORS:
-                extra_data = SensorExtraData(
-                    sensor_class=SensorClass.INVERTER,
-                    ecu_id=data.get("ecu-id"),
-                    parameter=sensor.key,
-                    inverter_id=data.get("uid"),
-                    inverter_channel=channel + 1,
+                config = APSystemSensorConfig(
+                    unique_id=f"{ecu_id}_{uid}_{sensor.parameter}_{channel}",
+                    device_identifier=device_identifiers,
+                    initial_value=data.get(sensor.parameter)[channel],
+                    name=f"{sensor.name} Ch {channel + 1}",
                 )
-                sensors.append(
-                    APSystemsInverterChannelSensor(
-                        coordinator, sensor, config_entry, extra_data
-                    )
-                )
+                sensors.append(APSystemsSensor(sensor, config))
 
         add_entities(sensors)
 
@@ -421,167 +299,86 @@ async def async_setup_entry(
         handle_inverter_registration,
     )
 
-    # Create migration listener
-    async_dispatcher_connect(
-        hass,
-        f"{DOMAIN}_migrate",
-        handle_migration,
-    )
-
     # Restore sensors for this config entry that have been registered previously.
     # Shows active sensors at startup even if no message form ECU yet received.
     # Restored sensors have their values from when HA was previously shut down/restarted.
     restore_sensors()
 
 
-class APSystemsSensor(RestoreSensor, CoordinatorEntity, SensorEntity):
-    """APSystems ECU Sensor and base class for Inverter sensors."""
+class APSystemsSensor(RestoreSensor, SensorEntity):
+    """Base APSystems sensor class."""
 
     _attr_has_entity_name = True
-    entity_description: APSystemSensorEntityDescription
 
     def __init__(
-        self,
-        coordinator,
-        entity_description: APSystemSensorEntityDescription,
-        config_entry: ConfigEntry,
-        extra_data: SensorExtraData | None = None,
+        self, definition: APSystemSensorDefinition, config: APSystemSensorConfig
     ) -> None:
         """Initialise sensor."""
-        super().__init__(coordinator)
-        self.entity_description = entity_description
-        self._config_entry = config_entry
-        self.extra_data = extra_data
-        self._current_state = None
+        self._definition = definition
+        self._config = config
         self._restored_state = None
-        self._state_data = None
+        self._attr_name = config.name or definition.name
+        self._attr_icon = definition.icon
+        self._attr_device_class = definition.device_class
+        self._attr_state_class = definition.state_class
+        self._attr_native_unit_of_measurement = definition.unit_of_measurement
 
-        _LOGGER.debug("Adding %s", self.entity_description.name)
-
-    async def async_added_to_hass(self) -> None:
-        """Register callbacks."""
-        await super().async_added_to_hass()
-        await self.restore_state()
+        if config.initial_value is not None:
+            self._attr_native_value = config.initial_value
 
     async def restore_state(self):
         """Get restored state from store."""
         if (state := await self.async_get_last_state()) is None:
             return
-        if state.state not in ["unknown", "unavailable"]:
-            self._restored_state = state.state
+
+        self._attr_unit_of_measurement = state.attributes.get("unit_of_measurement")
+
+        state_data = await self.async_get_last_sensor_data()
+        if state_data is not None:
+            if state_data.native_unit_of_measurement is not None:
+                self._attr_native_unit_of_measurement = (
+                    state_data.native_unit_of_measurement
+                )
+            if state_data.native_value is not None:
+                self._attr_native_value = state_data.native_value
 
         _LOGGER.debug(
-            "Restored state for %s of %s with uom %s",
+            "Restored state for %s of %s with native uom %s and uom %s",
             self.entity_id,
-            self._restored_state,
-            self.entity_description.unit_of_measurement,
+            state_data.native_value,
+            state_data.native_unit_of_measurement,
+            self._attr_unit_of_measurement,
         )
 
-    @property
-    def device_info(self):
-        """Return device registry information for this entity."""
-        return DeviceInfo(
-            identifiers={(DOMAIN, f"ecu_{self.extra_data.ecu_id}")},
-            manufacturer="APSystems",
-            suggested_area="Roof",
-            name=f"ECU {self.extra_data.ecu_id}",
-            model=f"{self.coordinator.data.get('model') if self.coordinator.data else self.extra_data.model}",
+    async def async_added_to_hass(self) -> None:
+        """Register callbacks."""
+        self.async_on_remove(
+            async_dispatcher_connect(
+                self.hass,
+                f"{DOMAIN}_{self._config.unique_id}",
+                self.update_state,
+            )
         )
+        if not self._config.initial_value:
+            await self.restore_state()
 
-    @property
-    def native_value(self):
-        """Return native value."""
-        if self.coordinator.data:
-            if state := self.coordinator.data.get(self.extra_data.parameter):
-                # Store last recieved state to use if no update on next message
-                self._current_state = state
-                return state
-            # No sensor data in last message, return last known state
-            return self._current_state
-        return self._restored_state
+    @callback
+    def update_state(self, data):
+        """Update sensor value."""
+        _LOGGER.debug(
+            "Updating sensor: %s with value %s",
+            self.entity_id,
+            data,
+        )
+        self.native_value = data
+        self.async_write_ha_state()
 
     @property
     def unique_id(self):
         """Return unique id."""
-        if self.entity_description.unique_id:
-            # Entity was restored - return the entity registry unique id.
-            return self.entity_description.unique_id
-        # Entity is being created - crete unique id from data
-        return f"{SensorClass.ECU}-{self.extra_data.ecu_id}-{self.extra_data.parameter}"
-
-
-class APSystemsInverterSensor(APSystemsSensor):
-    """APSystems Inverter Sensor."""
+        return self._config.unique_id
 
     @property
-    def native_value(self):
-        """Return native value."""
-        if self.coordinator.data:
-            if state := (
-                self.coordinator.data.get("inverters", {})
-                .get(self.extra_data.inverter_id, {})
-                .get(self.extra_data.parameter)
-            ):
-                self._current_state = state
-                return state
-            return self._current_state
-        return self._restored_state
-
-    @property
-    def unique_id(self):
-        """Return unique id."""
-        if self.entity_description.unique_id:
-            return self.entity_description.unique_id
-        return f"{SensorClass.INVERTER}-{self.extra_data.ecu_id}-{self.extra_data.inverter_id}-{self.extra_data.parameter}"
-
-    @property
-    def device_info(self):
-        """Return device registry information for this entity."""
-        return DeviceInfo(
-            identifiers={(DOMAIN, f"inverter_{self.extra_data.inverter_id}")},
-            manufacturer="APSystems",
-            suggested_area="Roof",
-            name=f"Inverter {self.extra_data.inverter_id}",
-            model=f"{self.coordinator.data.get('model') if self.coordinator.data else self.extra_data.model}",
-        )
-
-
-class APSystemsInverterChannelSensor(APSystemsInverterSensor):
-    """APSystems Inverter Channel Sensor."""
-
-    @property
-    def channel_id(self) -> int:
-        """Return inverter channel id."""
-        return int(self.extra_data.inverter_channel)
-
-    @property
-    def name(self):
-        """Return name."""
-        # Create name from description function to include channel number
-        if self.entity_description.name_fn:
-            return self.entity_description.name_fn(self.channel_id)
-        return self.entity_description.name
-
-    @property
-    def native_value(self):
-        """Return native value."""
-
-        if self.coordinator.data:
-            try:
-                if state := (
-                    self.coordinator.data.get("inverters", {})
-                    .get(self.extra_data.inverter_id, {})
-                    .get(self.extra_data.parameter, [])
-                )[self.channel_id - 1]:
-                    self._current_state = state
-                    return state
-            except IndexError:
-                return self._current_state
-        return self._restored_state
-
-    @property
-    def unique_id(self):
-        """Return unique id."""
-        if self.entity_description.unique_id:
-            return self.entity_description.unique_id
-        return f"{SensorClass.INVERTER}-{self.extra_data.ecu_id}-{self.extra_data.inverter_id}-{self.extra_data.parameter}-{self.channel_id}"
+    def device_info(self) -> DeviceInfo:
+        """Return device info."""
+        return DeviceInfo(identifiers=self._config.device_identifier)

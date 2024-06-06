@@ -1,11 +1,12 @@
 import asyncio
-from asyncio.trsock import TransportSocket
 from collections.abc import Callable
 from datetime import datetime
 import logging
 import re
 import traceback
 from typing import Any
+
+import pytz
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -96,9 +97,11 @@ class MySocketAPI:
                         addr = writer.get_extra_info("peername")
                         _LOGGER.debug("From ECU @%s - %s", addr, message)
                         # Get ECU data
-                        ecu["timestamp"] = str(
-                            datetime.strptime(message[60:74], "%Y%m%d%H%M%S")
+                        ts = datetime.strptime(message[60:74], "%Y%m%d%H%M%S").replace(
+                            tzinfo=pytz.UTC
                         )
+                        ecu["timestamp"] = ts
+
                         ecu["ecu-id"] = message[18:30]
                         ecu["model"] = self.get_model(message[18:22])
                         ecu["lifetime_energy"] = int(message[42:60]) / 10
@@ -107,7 +110,7 @@ class MySocketAPI:
                         ecu["lifetime_energy_production"] = 0
                         ecu["current_power"] = int(message[30:42]) / 100
                         ecu["qty_of_online_inverters"] = int(message[74:77])
-                        ecu["inverters"] = self.get_inverters(message)
+                        ecu["inverters"] = self.get_inverters(ecu["ecu-id"], message)
 
                         # Do not update lifetime energy during maintenance
                         # Move this to sensor updates
@@ -156,7 +159,7 @@ class MySocketAPI:
             return model
         return "Unknown"
 
-    def get_inverters(self, message: str) -> list[dict[str, Any]]:
+    def get_inverters(self, ecu_id: str, message: str) -> list[dict[str, Any]]:
         """Get inveters."""
         inverters = {}
 
