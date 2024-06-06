@@ -1,12 +1,11 @@
 import asyncio
 from collections.abc import Callable
-from datetime import datetime
+from datetime import datetime, UTC
 import logging
 import re
 import traceback
 from typing import Any
 
-import pytz
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -97,10 +96,9 @@ class MySocketAPI:
                         addr = writer.get_extra_info("peername")
                         _LOGGER.debug("From ECU @%s - %s", addr, message)
                         # Get ECU data
-                        ts = datetime.strptime(message[60:74], "%Y%m%d%H%M%S").replace(
-                            tzinfo=pytz.UTC
-                        )
-                        ecu["timestamp"] = ts
+                        ecu["timestamp"] = datetime.strptime(
+                            message[60:74], "%Y%m%d%H%M%S"
+                        ).replace(tzinfo=UTC)
 
                         ecu["ecu-id"] = message[18:30]
                         ecu["model"] = self.get_model(message[18:22])
@@ -112,38 +110,9 @@ class MySocketAPI:
                         ecu["qty_of_online_inverters"] = int(message[74:77])
                         ecu["inverters"] = self.get_inverters(ecu["ecu-id"], message)
 
-                        # Do not update lifetime energy during maintenance
-                        # Move this to sensor updates
-                        """
-                        if ecu_data.get("lifetime_energy") is None or int(
-                            message[42:60]
-                        ) / 10 > ecu_data.get("lifetime_energy"):
-                            ecu_data["lifetime_energy"] = int(message[42:60]) / 10
-                        """
-
                         response = await self.send_data_to_ema(self.port, data)
                         writer.write(response)
                         await writer.drain()
-
-                        # Do not update sensors when inverters are down (ignore maintenance updates)
-                        # TODO: Re-look at this - move to sensor logic
-                        """
-                        start_time = datetime.strptime(ecu.timestamp, "%Y-%m-%d %H:%M:%S")
-                        time_diff_min = (datetime.now() - start_time).total_seconds() / 60
-                        _LOGGER.debug(f"{time_diff_min:.2f} minutes: {ecu}")  # noqa: G004
-                        if time_diff_min > 10:
-                            ecu.current_power = 0
-                            ecu.qty_of_online_inverters = 0
-                            for inverter_info in ecu.inverters.values():
-                                inverter_info.update(
-                                    {
-                                        key: None
-                                        for key in inverter_info
-                                        if key not in ["uid", "model", "channel_qty"]
-                                    }
-                                )
-                            _LOGGER.debug("Timediff > 10 so keys are set to None: %s", ecu_data)
-                        """
 
                         # Call callback to send the data
                         self.callback(ecu)

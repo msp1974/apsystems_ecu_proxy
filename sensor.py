@@ -370,6 +370,15 @@ class APSystemsSensor(RestoreSensor, SensorEntity):
             self.entity_id,
             data,
         )
+
+        # Prevent updating total increasing sensors (ie historical energy sensors)
+        # with lower values.
+        if (
+            self.state_class == SensorStateClass.TOTAL_INCREASING
+            and data < self.native_value
+        ):
+            return
+
         self.native_value = data
         self.async_write_ha_state()
 
