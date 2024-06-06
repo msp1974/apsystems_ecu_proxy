@@ -100,6 +100,14 @@ ECU_SENSORS: tuple[APSystemSensorEntityDescription, ...] = (
         native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
     ),
     APSystemSensorEntityDescription(
+        key="lifetime_energy",
+        name="Lifetime Energy",
+        icon=SOLAR_ICON,
+        sensor_class=SensorClass.ECU,
+        device_class=SensorDeviceClass.ENERGY,
+        native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
+    ),
+    APSystemSensorEntityDescription(
         key="qty_of_online_inverters",
         name="Inverters Online",
         sensor_class=SensorClass.ECU,
@@ -170,6 +178,89 @@ async def async_setup_entry(
         except IndexError:
             return
 
+    def get_restore_sensor(entry: er.RegistryEntry):
+        """Restore an individual entity."""
+
+        if entry.domain != "sensor" or entry.disabled_by:
+            return
+
+        # We use the unique id to get the sensor type, ecu-id, inverter uid and channel
+        # to pass to our entity class.
+        unique_id_params = entry.unique_id.split("-")
+
+        if len(unique_id_params) < 3:
+            # This is using the old unique id format and needs migrating.
+            _LOGGER.debug(
+                "Old unique id - need to migrate - %s : %s",
+                entry.entity_id,
+                entry.unique_id,
+            )
+            coordinator.migration_required = True
+            return
+
+        # Set the extra data to pass to the sensor by splittign unique_id
+        # This is so that we can send same data structure for update data
+        # from the actual device.
+
+        # Get device model from the previously registered device.
+        # We need to do this as no other way to get it on a restored entity
+        # for device info on the entity.
+        if device := get_device_entry(entry.device_id):
+            device_model = device.model
+        else:
+            device_model = "Unknown"
+
+        # Create the entity extra data with the info itneeds to get its value
+        # when it receives some ECU data.
+        if unique_id_params[0] == SensorClass.ECU:
+            extra_data = SensorExtraData(
+                sensor_class=unique_id_params[0],
+                ecu_id=unique_id_params[1],
+                parameter=unique_id_params[2],
+                model=device_model,
+            )
+        else:
+            extra_data = SensorExtraData(
+                sensor_class=unique_id_params[0],
+                ecu_id=unique_id_params[1],
+                parameter=unique_id_params[3],
+                inverter_id=unique_id_params[2],
+                inverter_channel=unique_id_params[4]
+                if len(unique_id_params) == 5
+                else None,
+                model=device_model,
+            )
+
+        # Create entity description for restored sensor entity
+        entity_description = APSystemSensorEntityDescription(
+            key=extra_data.parameter,
+            sensor_class=extra_data.sensor_class,
+            device_class=entry.device_class or entry.original_device_class,
+            icon=entry.original_icon,
+            name=entry.original_name,
+            unique_id=entry.unique_id,
+            native_unit_of_measurement=entry.unit_of_measurement,
+            entity_category=entry.entity_category,
+            unit_of_measurement=entry.options.get("sensor", {}).get(
+                "unit_of_measurement"
+            ),
+            suggested_display_precision=entry.options.get("sensor", {}).get(
+                "display_precision"
+            ),
+        )
+
+        # Define which sensor class to use to create the sensor.
+        if extra_data.sensor_class == SensorClass.INVERTER:
+            if extra_data.inverter_channel is not None:
+                sensor_class = APSystemsInverterChannelSensor
+            else:
+                sensor_class = APSystemsInverterSensor
+        else:
+            sensor_class = APSystemsSensor
+
+        # Return sensor
+        return sensor_class(coordinator, entity_description, config_entry, extra_data)
+
     def restore_sensors():
         """Restore all previsouly registered sensors."""
         sensors = []
@@ -178,77 +269,79 @@ async def async_setup_entry(
         entries = er.async_entries_for_config_entry(
             entity_registry, config_entry.entry_id
         )
+
         for entry in entries:
-            if entry.domain != "sensor" or entry.disabled_by:
-                continue
+            if sensor := get_restore_sensor(entry):
+                sensors.append(sensor)  # noqa: PERF401
 
-            # We use the unique id to get the sensor type, ecu-id, inverter uid and channel
-            # to pass to our entity class.
-            unique_id_params = entry.unique_id.split("-")
+        if sensors:
+            add_entities(sensors)
 
-            # Set the extra data to pass to the sensor by splittign unique_id
-            # This is so that we can send same data structure for update data
-            # from the actual device.
+    @callback
+    def handle_migration(data):
+        """Handle migration of unique ids.
 
-            # Get device model from the previously registered device.
-            # We need to do this as no other way to get it on a restored entity
-            # for device info on the entity.
-            if device := get_device_entry(entry.device_id):
-                device_model = device.model
-            else:
-                device_model = "Unknown"
+        This will run if entities have old unique ids only on
+        first data received after startuo.
+        """
 
-            # Create the entity extra data with the info itneeds to get its value
-            # when it receives some ECU data.
-            if unique_id_params[0] == SensorClass.ECU:
-                extra_data = SensorExtraData(
-                    sensor_class=unique_id_params[0],
-                    ecu_id=unique_id_params[1],
-                    parameter=unique_id_params[2],
-                    model=device_model,
-                )
-            else:
-                extra_data = SensorExtraData(
-                    sensor_class=unique_id_params[0],
-                    ecu_id=unique_id_params[1],
-                    parameter=unique_id_params[3],
-                    inverter_id=unique_id_params[2],
-                    inverter_channel=unique_id_params[4].replace("CH", "")
-                    if len(unique_id_params) == 5
-                    else None,
-                    model=device_model,
-                )
+        sensors = []
 
-            # Create entity description for restored sensor entity
-            entity_description = APSystemSensorEntityDescription(
-                key=extra_data.parameter,
-                sensor_class=extra_data.sensor_class,
-                device_class=entry.device_class or entry.original_device_class,
-                icon=entry.original_icon,
-                name=entry.original_name,
-                unique_id=entry.unique_id,
-                unit_of_measurement=entry.options.get("sensor", {}).get(
-                    "unit_of_measurement"
-                ),
-                entity_category=entry.entity_category,
-            )
+        # Get entity registry
+        entity_registry = er.async_get(hass)
+        entries = er.async_entries_for_config_entry(
+            entity_registry, config_entry.entry_id
+        )
+        # Migrate ECU sensors
+        for sensor in ECU_SENSORS:
+            for entry in entries:
+                if entry.domain != "sensor" or entry.disabled_by:
+                    continue
 
-            # Define which sensor class to use to create the sensor.
-            if extra_data.sensor_class == SensorClass.INVERTER:
-                if extra_data.inverter_channel is not None:
-                    sensor_class = APSystemsInverterChannelSensor
-                else:
-                    sensor_class = APSystemsInverterSensor
-            else:
-                sensor_class = APSystemsSensor
+                if entry.unique_id == f"{data.get('ecu-id')}_{sensor.key}":
+                    _LOGGER.debug("Migrating: %s", entry.original_name)
+                    new_entry = entity_registry.async_update_entity(
+                        entry.entity_id,
+                        new_unique_id=f"{SensorClass.ECU}-{data.get('ecu-id')}-{sensor.key}",
+                    )
+                    sensors.append(get_restore_sensor(new_entry))
 
-            # Add sensor to the list.
-            sensors.append(
-                sensor_class(coordinator, entity_description, config_entry, extra_data)
-            )
+        # Migrate Inverter sensors
+        for uid, inverter in data.get("inverters").items():
+            for sensor in INVERTER_SENSORS:
+                for entry in entries:
+                    if entry.domain != "sensor" or entry.disabled_by:
+                        continue
 
-        # Create all the restored sensors.
-        add_entities(sensors)
+                    if entry.unique_id == f"{data.get('ecu-id')}_{uid}_{sensor.key}":
+                        _LOGGER.debug("Migrating: %s", entry.original_name)
+                        new_entry = entity_registry.async_update_entity(
+                            entry.entity_id,
+                            new_unique_id=f"{SensorClass.INVERTER}-{data.get('ecu-id')}-{uid}-{sensor.key}",
+                        )
+                        sensors.append(get_restore_sensor(new_entry))
+
+            # Inverter channels
+            for sensor in INVERTER_CHANNEL_SENSORS:
+                for channel in range(inverter.get("channel_qty", 0)):
+                    for entry in entries:
+                        if entry.domain != "sensor" or entry.disabled_by:
+                            continue
+
+                        if (
+                            entry.unique_id
+                            == f"{data.get('ecu-id')}_{uid}_{sensor.key}_{channel}"
+                        ):
+                            _LOGGER.debug("Migrating: %s", entry.original_name)
+                            new_entry: er.RegistryEntry = entity_registry.async_update_entity(
+                                entry.entity_id,
+                                new_unique_id=f"{SensorClass.INVERTER}-{data.get('ecu-id')}-{uid}-{sensor.key}-{channel}",
+                            )
+
+                            sensors.append(get_restore_sensor(new_entry))
+
+        if sensors:
+            add_entities(sensors)
 
     @callback
     def handle_ecu_registration(data):
@@ -328,6 +421,13 @@ async def async_setup_entry(
         handle_inverter_registration,
     )
 
+    # Create migration listener
+    async_dispatcher_connect(
+        hass,
+        f"{DOMAIN}_migrate",
+        handle_migration,
+    )
+
     # Restore sensors for this config entry that have been registered previously.
     # Shows active sensors at startup even if no message form ECU yet received.
     # Restored sensors have their values from when HA was previously shut down/restarted.
@@ -352,7 +452,8 @@ class APSystemsSensor(RestoreSensor, CoordinatorEntity, SensorEntity):
         self.entity_description = entity_description
         self._config_entry = config_entry
         self.extra_data = extra_data
-        self._state = None
+        self._current_state = None
+        self._restored_state = None
         self._state_data = None
 
         _LOGGER.debug("Adding %s", self.entity_description.name)
@@ -366,19 +467,14 @@ class APSystemsSensor(RestoreSensor, CoordinatorEntity, SensorEntity):
         """Get restored state from store."""
         if (state := await self.async_get_last_state()) is None:
             return
-
-        self._state = state.state
-        self._state_data = await self.async_get_last_sensor_data()
-
-        self._attr_native_unit_of_measurement = (
-            self._state_data.native_unit_of_measurement
-        )
+        if state.state not in ["unknown", "unavailable"]:
+            self._restored_state = state.state
 
         _LOGGER.debug(
             "Restored state for %s of %s with uom %s",
             self.entity_id,
-            self._state,
-            self._state_data.native_unit_of_measurement,
+            self._restored_state,
+            self.entity_description.unit_of_measurement,
         )
 
     @property
@@ -396,15 +492,21 @@ class APSystemsSensor(RestoreSensor, CoordinatorEntity, SensorEntity):
     def native_value(self):
         """Return native value."""
         if self.coordinator.data:
-            return self.coordinator.data.get(self.extra_data.parameter)
-        if self._state_data:
-            return self._state_data.native_value
+            if state := self.coordinator.data.get(self.extra_data.parameter):
+                # Store last recieved state to use if no update on next message
+                self._current_state = state
+                return state
+            # No sensor data in last message, return last known state
+            return self._current_state
+        return self._restored_state
 
     @property
     def unique_id(self):
         """Return unique id."""
         if self.entity_description.unique_id:
+            # Entity was restored - return the entity registry unique id.
             return self.entity_description.unique_id
+        # Entity is being created - crete unique id from data
         return f"{SensorClass.ECU}-{self.extra_data.ecu_id}-{self.extra_data.parameter}"
 
 
@@ -415,21 +517,21 @@ class APSystemsInverterSensor(APSystemsSensor):
     def native_value(self):
         """Return native value."""
         if self.coordinator.data:
-            return (
+            if state := (
                 self.coordinator.data.get("inverters", {})
-                .get(self.extra_data.inverter_id)
+                .get(self.extra_data.inverter_id, {})
                 .get(self.extra_data.parameter)
-            )
-        if self._state_data:
-            return self._state_data.native_value
+            ):
+                self._current_state = state
+                return state
+            return self._current_state
+        return self._restored_state
 
     @property
     def unique_id(self):
         """Return unique id."""
         if self.entity_description.unique_id:
-            # Entity was restored - return the entity registry unique id.
             return self.entity_description.unique_id
-        # Entity is being created - crete unique id from data
         return f"{SensorClass.INVERTER}-{self.extra_data.ecu_id}-{self.extra_data.inverter_id}-{self.extra_data.parameter}"
 
     @property
@@ -455,6 +557,7 @@ class APSystemsInverterChannelSensor(APSystemsInverterSensor):
     @property
     def name(self):
         """Return name."""
+        # Create name from description function to include channel number
         if self.entity_description.name_fn:
             return self.entity_description.name_fn(self.channel_id)
         return self.entity_description.name
@@ -464,17 +567,21 @@ class APSystemsInverterChannelSensor(APSystemsInverterSensor):
         """Return native value."""
 
         if self.coordinator.data:
-            return (
-                self.coordinator.data.get("inverters", {})
-                .get(self.extra_data.inverter_id)
-                .get(self.extra_data.parameter)
-            )[self.channel_id - 1]
-        if self._state_data:
-            return self._state_data.native_value
+            try:
+                if state := (
+                    self.coordinator.data.get("inverters", {})
+                    .get(self.extra_data.inverter_id, {})
+                    .get(self.extra_data.parameter, [])
+                )[self.channel_id - 1]:
+                    self._current_state = state
+                    return state
+            except IndexError:
+                return self._current_state
+        return self._restored_state
 
     @property
     def unique_id(self):
         """Return unique id."""
         if self.entity_description.unique_id:
             return self.entity_description.unique_id
-        return f"{SensorClass.INVERTER}-{self.extra_data.ecu_id}-{self.extra_data.inverter_id}-{self.extra_data.parameter}-CH{self.channel_id}"
+        return f"{SensorClass.INVERTER}-{self.extra_data.ecu_id}-{self.extra_data.inverter_id}-{self.extra_data.parameter}-{self.channel_id}"

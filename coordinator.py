@@ -23,6 +23,7 @@ class APSystemCoordinator(DataUpdateCoordinator):
         """Initialize coordinator."""
 
         self.socket_servers: list[MySocketAPI] = []
+        self.migration_required: bool = False
 
         # Initialise DataUpdateCoordinator
         super().__init__(
@@ -56,29 +57,33 @@ class APSystemCoordinator(DataUpdateCoordinator):
         # Set self.data so that sensor entities can use it when being created.
         self.data = data
 
-        # If not a registered ECU
-        if not self.get_device({(DOMAIN, f"ecu_{self.data.get("ecu-id")}")}):
-            # New ECU, add sensors
-            _LOGGER.debug("Found new ECU: %s", self.data.get("ecu-id"))
-            # Send signal to sensor listener to add new ECU
-            async_dispatcher_send(self.hass, f"{DOMAIN}_ecu_register", self.data)
+        # If first time we have run this version, we need to migrate unique ids
+        if self.migration_required:
+            async_dispatcher_send(self.hass, f"{DOMAIN}_migrate", self.data)
         else:
-            _LOGGER.debug("Update for known ECU: %s", self.data.get("ecu-id"))
-
-        # Check for not registered inverters
-        for uid, inverter in self.data.get("inverters", {}).items():
-            if not self.get_device({(DOMAIN, f"inverter_{uid}")}):
-                _LOGGER.debug("Found new Inverter: %s", inverter.get("uid"))
-
-                # Add ecu-id to inverter data so that sensor can use this.
-                inverter["ecu-id"] = self.data.get("ecu-id")
-
-                # Send signal to sensor listener to add new Inverter
-                async_dispatcher_send(
-                    self.hass, f"{DOMAIN}_inverter_register", inverter
-                )
+            # If not a registered ECU
+            if not self.get_device({(DOMAIN, f"ecu_{self.data.get("ecu-id")}")}):
+                # New ECU, add sensors
+                _LOGGER.debug("Found new ECU: %s", self.data.get("ecu-id"))
+                # Send signal to sensor listener to add new ECU
+                async_dispatcher_send(self.hass, f"{DOMAIN}_ecu_register", self.data)
             else:
-                _LOGGER.debug("Update for known inverter: %s", inverter.get("uid"))
+                _LOGGER.debug("Update for known ECU: %s", self.data.get("ecu-id"))
+
+            # Check for not registered inverters
+            for uid, inverter in self.data.get("inverters", {}).items():
+                if not self.get_device({(DOMAIN, f"inverter_{uid}")}):
+                    _LOGGER.debug("Found new Inverter: %s", inverter.get("uid"))
+
+                    # Add ecu-id to inverter data so that sensor can use this.
+                    inverter["ecu-id"] = self.data.get("ecu-id")
+
+                    # Send signal to sensor listener to add new Inverter
+                    async_dispatcher_send(
+                        self.hass, f"{DOMAIN}_inverter_register", inverter
+                    )
+                else:
+                    _LOGGER.debug("Update for known inverter: %s", inverter.get("uid"))
 
         # Trigger entities to update.
         self.async_set_updated_data(self.data)
