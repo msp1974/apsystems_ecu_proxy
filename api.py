@@ -1,11 +1,14 @@
+"""API to interact with APSystems ECU."""
+
 import asyncio
 from collections.abc import Callable
-from datetime import datetime, UTC
+from datetime import UTC, datetime
 import logging
 import re
 import traceback
 from typing import Any
 
+from .const import EMA_HOST
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -110,12 +113,13 @@ class MySocketAPI:
                         ecu["qty_of_online_inverters"] = int(message[74:77])
                         ecu["inverters"] = self.get_inverters(ecu["ecu-id"], message)
 
-                        response = await self.send_data_to_ema(self.port, data)
-                        writer.write(response)
-                        await writer.drain()
-
                         # Call callback to send the data
                         self.callback(ecu)
+
+                response = await self.send_data_to_ema(self.port, data)
+                writer.write(response)
+                await writer.drain()
+
             except Exception:
                 _LOGGER.warning("Exception error with %s", traceback.format_exc())
                 return None
@@ -170,7 +174,7 @@ class MySocketAPI:
 
     async def send_data_to_ema(self, port: int, data: bytes):
         """Send data over async socket."""
-        reader, writer = await asyncio.open_connection("3.67.1.32", port)
+        reader, writer = await asyncio.open_connection(EMA_HOST, port)
         writer.write(data)
         await writer.drain()
 
