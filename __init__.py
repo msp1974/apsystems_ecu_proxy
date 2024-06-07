@@ -163,7 +163,7 @@ class APIManager:
         """Send a dispatch message to update sensor."""
         _LOGGER.debug(
             "Requesting %s to update with value %s",
-            channel_id,
+            channel_id.replace(f"{DOMAIN}_", ""),
             data,
         )
         async_dispatcher_send(self.hass, channel_id, data)
