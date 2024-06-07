@@ -281,18 +281,14 @@ async def async_setup_entry(
 
         add_entities(sensors)
 
-    # Create listener for ecu registration.
-    # Called by coordinator when new ECU found.
+    # Create listener for ecu or inverter registration.
+    # Called by update callback in APManager class.
     # Allows dynamic creating of sensors.
     async_dispatcher_connect(
         hass,
         f"{DOMAIN}_ecu_register",
         handle_ecu_registration,
     )
-
-    # Create listener for inverter registration.
-    # Called by coordinator when new inverter found.
-    # Allows dynamic creating of sensors.
     async_dispatcher_connect(
         hass,
         f"{DOMAIN}_inverter_register",
@@ -300,7 +296,7 @@ async def async_setup_entry(
     )
 
     # Restore sensors for this config entry that have been registered previously.
-    # Shows active sensors at startup even if no message form ECU yet received.
+    # Shows active sensors at startup even if no message from ECU yet received.
     # Restored sensors have their values from when HA was previously shut down/restarted.
     restore_sensors()
 
@@ -316,25 +312,38 @@ class APSystemsSensor(RestoreSensor, SensorEntity):
         """Initialise sensor."""
         self._definition = definition
         self._config = config
-        self._restored_state = None
-        self._attr_name = config.name or definition.name
-        self._attr_icon = definition.icon
+
         self._attr_device_class = definition.device_class
-        self._attr_state_class = definition.state_class
+        self._attr_device_info = DeviceInfo(identifiers=self._config.device_identifier)
+        self._attr_icon = definition.icon
+        self._attr_name = config.name or definition.name
         self._attr_native_unit_of_measurement = definition.unit_of_measurement
+        self._attr_state_class = definition.state_class
+        self._attr_unique_id = self._config.unique_id
 
         if config.initial_value is not None:
             self._attr_native_value = config.initial_value
 
+    async def async_added_to_hass(self) -> None:
+        """Register callbacks."""
+        self.async_on_remove(
+            async_dispatcher_connect(
+                self.hass,
+                f"{DOMAIN}_{self._config.unique_id}",
+                self.update_state,
+            )
+        )
+        if not self._config.initial_value:
+            await self.restore_state()
+
     async def restore_state(self):
         """Get restored state from store."""
-        if (state := await self.async_get_last_state()) is None:
-            return
+        if (state := await self.async_get_last_state()) is not None:
+            # Set unit of measurement in case user has changed this in UI
+            self._attr_unit_of_measurement = state.attributes.get("unit_of_measurement")
 
-        self._attr_unit_of_measurement = state.attributes.get("unit_of_measurement")
-
-        state_data = await self.async_get_last_sensor_data()
-        if state_data is not None:
+        if (state_data := await self.async_get_last_sensor_data()) is not None:
+            # Set our native values
             if state_data.native_unit_of_measurement is not None:
                 self._attr_native_unit_of_measurement = (
                     state_data.native_unit_of_measurement
@@ -349,18 +358,6 @@ class APSystemsSensor(RestoreSensor, SensorEntity):
             state_data.native_unit_of_measurement,
             self._attr_unit_of_measurement,
         )
-
-    async def async_added_to_hass(self) -> None:
-        """Register callbacks."""
-        self.async_on_remove(
-            async_dispatcher_connect(
-                self.hass,
-                f"{DOMAIN}_{self._config.unique_id}",
-                self.update_state,
-            )
-        )
-        if not self._config.initial_value:
-            await self.restore_state()
 
     @callback
     def update_state(self, data):
@@ -381,13 +378,3 @@ class APSystemsSensor(RestoreSensor, SensorEntity):
 
         self.native_value = data
         self.async_write_ha_state()
-
-    @property
-    def unique_id(self):
-        """Return unique id."""
-        return self._config.unique_id
-
-    @property
-    def device_info(self) -> DeviceInfo:
-        """Return device info."""
-        return DeviceInfo(identifiers=self._config.device_identifier)
