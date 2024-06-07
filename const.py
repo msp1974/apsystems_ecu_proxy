@@ -14,3 +14,4 @@ DCVOLTAGE_ICON = "mdi:current-dc"
 POWER_ICON = "mdi:power"
 
 SOCKET_PORTS = [8995, 8996, 8997]
+EMA_HOST = "ecu.apsystemsema.com"
