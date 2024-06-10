@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 import logging
 from typing import Any
 
@@ -14,6 +15,7 @@ from homeassistant.components.sensor import (
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import (
+    ATTR_UNIT_OF_MEASUREMENT,
     UnitOfElectricCurrent,
     UnitOfElectricPotential,
     UnitOfEnergy,
@@ -27,10 +29,41 @@ from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.util import dt as dt_util
 
-from .const import DOMAIN, SOLAR_ICON
+from .const import (
+    ATTR_SUMATION_PERIOD,
+    ATTR_SUMMATION_FACTOR,
+    ATTR_TIMESTAMP,
+    DOMAIN,
+    MAX_STUB_INTERVAL,
+    SOLAR_ICON,
+    SummationPeriod,
+)
+from .helpers import (
+    add_local_timezone,
+    get_period_start_timestamp,
+    has_changed_period,
+    slugify,
+)
 
 _LOGGER = logging.getLogger(__name__)
+
+
+@dataclass
+class SensorData:
+    """Class to pass data to sensor."""
+
+    data: Any
+    attributes: dict[str, Any] | None = None
+
+
+@dataclass
+class SummationParameters:
+    """Class for summation attributes."""
+
+    value: str
+    timestamp: str
 
 
 @dataclass
@@ -40,7 +73,7 @@ class APSystemSensorConfig:
     unique_id: str | None = None
     name: str | None = None
     device_identifier: str | None = None
-    initial_value: str | None = None
+    initial_value: SensorData | None = None
     display_uom: str | None = None
     display_precision: int | None = None
 
@@ -56,6 +89,9 @@ class APSystemSensorDefinition:
     state_class: SensorStateClass | None = None
     unit_of_measurement: str | None = None
     entity_category: EntityCategory | None = None
+    summation_entity: bool = False
+    summation_period: SummationPeriod | None = None
+    summation_factor: float = 1
 
 
 ECU_SENSORS: tuple[APSystemSensorDefinition, ...] = (
@@ -69,26 +105,35 @@ ECU_SENSORS: tuple[APSystemSensorDefinition, ...] = (
     APSystemSensorDefinition(
         name="Hourly Energy Production",
         icon=SOLAR_ICON,
-        parameter="hourly_energy_production",
+        parameter="current_power",
         device_class=SensorDeviceClass.ENERGY,
-        state_class=SensorStateClass.TOTAL_INCREASING,
+        state_class=SensorStateClass.TOTAL,
         unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
+        summation_entity=True,
+        summation_period=SummationPeriod.HOURLY,
+        summation_factor=1000,
     ),
     APSystemSensorDefinition(
         name="Daily Energy Production",
         icon=SOLAR_ICON,
-        parameter="daily_energy_production",
+        parameter="current_power",
         device_class=SensorDeviceClass.ENERGY,
-        state_class=SensorStateClass.TOTAL_INCREASING,
+        state_class=SensorStateClass.TOTAL,
         unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
+        summation_entity=True,
+        summation_period=SummationPeriod.DAILY,
+        summation_factor=1000,
     ),
     APSystemSensorDefinition(
         name="Lifetime Energy Production",
         icon=SOLAR_ICON,
-        parameter="lifetime_energy_production",
+        parameter="current_power",
         device_class=SensorDeviceClass.ENERGY,
         state_class=SensorStateClass.TOTAL_INCREASING,
         unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
+        summation_entity=True,
+        summation_period=SummationPeriod.LIFETIME,
+        summation_factor=1000,
     ),
     APSystemSensorDefinition(
         name="Lifetime Energy",
@@ -202,7 +247,7 @@ async def async_setup_entry(
             add_entities(sensors)
 
     @callback
-    def handle_ecu_registration(data):
+    def handle_ecu_registration(data: dict[str, Any]):
         """Handle ECU entity creation."""
 
         # We have found an ECU that is not resgistered in the device registry
@@ -226,10 +271,17 @@ async def async_setup_entry(
 
         sensors = []
         for sensor in ECU_SENSORS:
+            # Added for summation sensors to get initial attribute values
+            initial_attribute_values = {}
+            if sensor.summation_entity:
+                initial_attribute_values[ATTR_TIMESTAMP] = data.get(ATTR_TIMESTAMP)
+
             config = APSystemSensorConfig(
-                unique_id=f"{ecu_id}_{sensor.parameter}",
+                unique_id=f"{ecu_id}_{slugify(sensor.name)}",
                 device_identifier=device_identifiers,
-                initial_value=data.get(sensor.parameter),
+                initial_value=SensorData(
+                    data=data.get(sensor.parameter), attributes=initial_attribute_values
+                ),
             )
             sensors.append(APSystemsSensor(sensor, config))
         add_entities(sensors)
@@ -262,9 +314,9 @@ async def async_setup_entry(
         sensors = []
         for sensor in INVERTER_SENSORS:
             config = APSystemSensorConfig(
-                unique_id=f"{ecu_id}_{uid}_{sensor.parameter}",
+                unique_id=f"{ecu_id}_{uid}_{slugify(sensor.name)}",
                 device_identifier=device_identifiers,
-                initial_value=data.get(sensor.parameter),
+                initial_value=SensorData(data=data.get(sensor.parameter)),
             )
             sensors.append(APSystemsSensor(sensor, config))
 
@@ -272,9 +324,9 @@ async def async_setup_entry(
         for channel in range(data.get("channel_qty", 0)):
             for sensor in INVERTER_CHANNEL_SENSORS:
                 config = APSystemSensorConfig(
-                    unique_id=f"{ecu_id}_{uid}_{sensor.parameter}_{channel}",
+                    unique_id=f"{ecu_id}_{uid}_{slugify(sensor.name)}_{channel + 1}",
                     device_identifier=device_identifiers,
-                    initial_value=data.get(sensor.parameter)[channel],
+                    initial_value=SensorData(data=data.get(sensor.parameter)[channel]),
                     name=f"{sensor.name} Ch {channel + 1}",
                 )
                 sensors.append(APSystemsSensor(sensor, config))
@@ -321,11 +373,16 @@ class APSystemsSensor(RestoreSensor, SensorEntity):
         self._attr_state_class = definition.state_class
         self._attr_unique_id = self._config.unique_id
 
-        if config.initial_value is not None:
-            self._attr_native_value = config.initial_value
+    @property
+    def is_summation_sensor(self) -> bool:
+        """Is this a summation sensor."""
+        return (
+            hasattr(self, "_attr_extra_state_attributes")
+            and self._attr_extra_state_attributes.get(ATTR_SUMATION_PERIOD)
+        ) or self._definition.summation_entity
 
     async def async_added_to_hass(self) -> None:
-        """Register callbacks."""
+        """Run when entity about to be added to hass."""
         self.async_on_remove(
             async_dispatcher_connect(
                 self.hass,
@@ -333,14 +390,19 @@ class APSystemsSensor(RestoreSensor, SensorEntity):
                 self.update_state,
             )
         )
-        if not self._config.initial_value:
+        if self._config.initial_value:
+            self.set_initial_value()
+        else:
             await self.restore_state()
 
     async def restore_state(self):
         """Get restored state from store."""
         if (state := await self.async_get_last_state()) is not None:
             # Set unit of measurement in case user has changed this in UI
-            self._attr_unit_of_measurement = state.attributes.get("unit_of_measurement")
+            self._attr_unit_of_measurement = state.attributes.get(
+                ATTR_UNIT_OF_MEASUREMENT
+            )
+            self._attr_extra_state_attributes = state.attributes
 
         if (state_data := await self.async_get_last_sensor_data()) is not None:
             # Set our native values
@@ -359,22 +421,146 @@ class APSystemsSensor(RestoreSensor, SensorEntity):
             self._attr_unit_of_measurement,
         )
 
+    def set_initial_value(self):
+        """Set initial values on sensor creation."""
+        if self._config.initial_value is not None:
+            if self._definition.summation_entity:
+                self.native_value = 0
+                self.set_summation_entity_attributes()
+            elif (
+                self._definition.device_class == SensorDeviceClass.TIMESTAMP
+                and isinstance(self._config.initial_value.data, datetime)
+            ):
+                # Need to have a timezone for timestamp sensor
+                self.native_value = add_local_timezone(
+                    self.hass, self._config.initial_value.data
+                )
+            else:
+                self.native_value = self._config.initial_value.data
+
+    def set_summation_entity_attributes(self):
+        """Set initial base attribute values."""
+        self._attr_extra_state_attributes = {
+            ATTR_SUMATION_PERIOD: self._definition.summation_period,
+            ATTR_SUMMATION_FACTOR: self._definition.summation_factor,
+            ATTR_TIMESTAMP: self._config.initial_value.attributes.get(ATTR_TIMESTAMP),
+        }
+
+    def update_attributes(self, attributes: dict[str, Any]):
+        """Update attribute values."""
+        current_attributes = self._attr_extra_state_attributes.copy()
+        current_attributes.update(attributes)
+        self._attr_extra_state_attributes = current_attributes
+
     @callback
-    def update_state(self, data):
+    def update_state(self, update_data: SensorData):
         """Update sensor value."""
-        _LOGGER.debug(
-            "Updating sensor: %s with value %s",
-            self.entity_id,
-            data,
-        )
+        update_value = update_data.data
+
+        # If summation entity, calculate value
+        # This will error reading _attr_extra_state_attributes when sensor first created,
+        # so check.
+        if self.is_summation_sensor:
+            summation_period = self._attr_extra_state_attributes.get(
+                ATTR_SUMATION_PERIOD
+            )
+            summation_factor = self._attr_extra_state_attributes.get(
+                ATTR_SUMMATION_FACTOR
+            )
+
+            current_timestamp = update_data.attributes.get(ATTR_TIMESTAMP)
+            last_timestamp = self._attr_extra_state_attributes.get(ATTR_TIMESTAMP)
+            # Convert base timestamp attribute from string if needed
+            if not isinstance(last_timestamp, datetime):
+                last_timestamp = dt_util.parse_datetime(last_timestamp)
+
+            update_value = self.summation_calculation(
+                summation_period,
+                summation_factor,
+                last_timestamp,
+                current_timestamp,
+                self.native_value,
+                update_value,
+            )
+
+            # Update attributes
+            self.update_attributes({ATTR_TIMESTAMP: current_timestamp})
 
         # Prevent updating total increasing sensors (ie historical energy sensors)
         # with lower values.
         if (
             self.state_class == SensorStateClass.TOTAL_INCREASING
-            and data < self.native_value
+            and update_value < self.native_value
         ):
             return
 
-        self.native_value = data
+        # Timestamp sensor needs a timezone.  As our timestamp data is timezone unaware,
+        # give it timezone.
+        if self.device_class == SensorDeviceClass.TIMESTAMP and isinstance(
+            update_value, datetime
+        ):
+            update_value = add_local_timezone(self.hass, update_value)
+
+        _LOGGER.debug(
+            "Updating sensor: %s with value %s",
+            self.entity_id,
+            update_value,
+        )
+        self.native_value = update_value
         self.async_write_ha_state()
+
+    def summation_calculation(
+        self,
+        summation_period: SummationPeriod,
+        summation_factor: float,
+        last_timestamp: datetime,
+        current_timestamp: datetime,
+        current_value: float,
+        value: float,
+    ) -> int | float:
+        """Return summation value of value over time.
+
+        If change in period, calculates a value over time from start of new period with
+        max of MAX_STUB_INTERVAL.
+
+        If no change in period, assumes value persisted since last timestamp.
+        """
+        interval = (current_timestamp - last_timestamp).seconds
+
+        _LOGGER.debug(
+            "Summation values: Period: %s, Timestamp - last: %s, current: %s, Value - sensor: %s, current: %s",
+            summation_period,
+            last_timestamp,
+            current_timestamp,
+            current_value,
+            value,
+        )
+
+        # Has it crossed calculation period boundry?
+        if has_changed_period(summation_period, last_timestamp, current_timestamp):
+            # Calculate portion of current value to set as start value
+            new_period_interval = max(
+                (
+                    current_timestamp
+                    - get_period_start_timestamp(summation_period, current_timestamp)
+                ).total_seconds(),
+                MAX_STUB_INTERVAL,
+            )
+            sum_value = int(value * (new_period_interval / 3600)) / summation_factor
+            _LOGGER.debug(
+                "New summation period - Period interval(s): %i, Value: %f",
+                new_period_interval,
+                sum_value,
+            )
+        else:
+            sum_value = (
+                current_value + int(value * (interval / 3600)) / summation_factor
+            )
+
+            _LOGGER.debug(
+                "Same summation period - Period interval(s): %s, Value: %f",
+                interval,
+                sum_value,
+            )
+
+        return sum_value

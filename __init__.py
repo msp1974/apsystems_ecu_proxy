@@ -11,8 +11,9 @@ from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 
 from .api import MySocketAPI
-from .const import DOMAIN, SOCKET_PORTS
-from .sensor import ECU_SENSORS, INVERTER_CHANNEL_SENSORS, INVERTER_SENSORS
+from .const import ATTR_INVERTERS, ATTR_TIMESTAMP, DOMAIN, SOCKET_PORTS
+from .helpers import slugify
+from .sensor import ECU_SENSORS, INVERTER_CHANNEL_SENSORS, INVERTER_SENSORS, SensorData
 
 _LOGGER = logging.getLogger(__name__)
 PLATFORMS = ["sensor"]
@@ -27,10 +28,10 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry):
 
     hass.data.setdefault(DOMAIN, {})
 
-    coordinator = APIManager(hass, config_entry)
-    await coordinator.setup_socket_servers()
+    api_handler = APIManager(hass, config_entry)
+    await api_handler.setup_socket_servers()
 
-    hass.data[DOMAIN][config_entry.entry_id] = {"coordinator": coordinator}
+    hass.data[DOMAIN][config_entry.entry_id] = {"api_handler": api_handler}
 
     await hass.config_entries.async_forward_entry_setups(config_entry, PLATFORMS)
     return True
@@ -40,7 +41,9 @@ async def async_unload_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> 
     """Unload a config entry."""
 
     # Stop socket servers
-    await hass.data[DOMAIN][config_entry.entry_id]["coordinator"].async_shutdown()
+    api_handlder: APIManager = hass.data[DOMAIN][config_entry.entry_id]["api_handler"]
+    await api_handlder.async_shutdown()
+
     # Unload platforms
     unload_ok = await hass.config_entries.async_unload_platforms(
         config_entry, PLATFORMS
@@ -49,6 +52,7 @@ async def async_unload_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> 
     # Remove the config entry from the hass data object.
     if unload_ok:
         hass.data[DOMAIN].pop(config_entry.entry_id)
+        _LOGGER.debug("%s unloaded config id - %s", DOMAIN, config_entry.entry_id)
 
     # Return that unloading was successful.
     return unload_ok
@@ -93,9 +97,8 @@ class APIManager:
     async def async_shutdown(self) -> None:
         """Run shutdown clean up."""
         for socket_server in self.socket_servers:
-            # This might be blocking and if so do
-            # await hass.async_run_in_executor(socket_server.shutdown())
-            socket_server.stop()
+            await socket_server.stop()
+        self.socket_servers.clear()
 
     def get_device(self, identifiers):
         """Get device from device registry."""
@@ -114,9 +117,21 @@ class APIManager:
             async_dispatcher_send(self.hass, f"{DOMAIN}_ecu_register", data)
         else:
             _LOGGER.debug("Update for ECU: %s", ecu_id)
+            # Request sensors to update
+            for sensor in ECU_SENSORS:
+                # Added for summation sensors to get initial attribute values
+                attribute_values = {}
+                if sensor.summation_entity:
+                    attribute_values[ATTR_TIMESTAMP] = data.get(ATTR_TIMESTAMP)
+                self._request_sensor_to_update(
+                    f"{DOMAIN}_{ecu_id}_{slugify(sensor.name)}",
+                    SensorData(
+                        data=data.get(sensor.parameter), attributes=attribute_values
+                    ),
+                )
 
         # Check if inverters registered in devices
-        for uid, inverter in data.get("inverters", {}).items():
+        for uid, inverter in data.get(ATTR_INVERTERS, {}).items():
             if not self.get_device({(DOMAIN, f"inverter_{uid}")}):
                 _LOGGER.debug("Found new Inverter: %s", inverter.get("uid"))
 
@@ -129,35 +144,32 @@ class APIManager:
                 )
             else:
                 _LOGGER.debug("Update for known inverter: %s", inverter.get("uid"))
-
-        # Request sensors to update
-        for sensor in ECU_SENSORS:
-            if data.get(sensor.parameter) is not None:
-                self._request_sensor_to_update(
-                    f"{DOMAIN}_{ecu_id}_{sensor.parameter}",
-                    data.get(sensor.parameter),
-                )
-
-        for uid, inverter in data.get("inverters").items():
-            for inverter_sensor in INVERTER_SENSORS:
-                if inverter.get(inverter_sensor.parameter):
-                    self._request_sensor_to_update(
-                        f"{DOMAIN}_{ecu_id}_{uid}_{inverter_sensor.parameter}",
-                        inverter.get(inverter_sensor.parameter),
-                    )
-
-            for channel in range(inverter.get("channel_qty", 0)):
-                for inverter_channel_sensor in INVERTER_CHANNEL_SENSORS:
-                    try:
-                        if inverter.get(inverter_channel_sensor.parameter)[channel]:
+                for uid, inverter in data.get(ATTR_INVERTERS).items():
+                    for inverter_sensor in INVERTER_SENSORS:
+                        if inverter.get(inverter_sensor.parameter):
                             self._request_sensor_to_update(
-                                f"{DOMAIN}_{ecu_id}_{uid}_{inverter_channel_sensor.parameter}_{channel}",
-                                inverter.get(inverter_channel_sensor.parameter)[
-                                    channel
-                                ],
+                                f"{DOMAIN}_{ecu_id}_{uid}_{slugify(inverter_sensor.name)}",
+                                SensorData(
+                                    data=inverter.get(inverter_sensor.parameter)
+                                ),
                             )
-                    except (ValueError, IndexError):
-                        continue
+
+                    for channel in range(inverter.get("channel_qty", 0)):
+                        for inverter_channel_sensor in INVERTER_CHANNEL_SENSORS:
+                            try:
+                                if inverter.get(inverter_channel_sensor.parameter)[
+                                    channel
+                                ]:
+                                    self._request_sensor_to_update(
+                                        f"{DOMAIN}_{ecu_id}_{uid}_{slugify(inverter_channel_sensor.name)}_{channel + 1}",
+                                        SensorData(
+                                            data=inverter.get(
+                                                inverter_channel_sensor.parameter
+                                            )[channel]
+                                        ),
+                                    )
+                            except (ValueError, IndexError):
+                                continue
 
     def _request_sensor_to_update(self, channel_id: str, data: Any):
         """Send a dispatch message to update sensor."""

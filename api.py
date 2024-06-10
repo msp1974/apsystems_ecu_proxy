@@ -2,13 +2,13 @@
 
 import asyncio
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import datetime
 import logging
 import re
 import traceback
 from typing import Any
 
-from .const import EMA_HOST
+from .const import EMA_HOST, MESSAGE_IGNORE_AGE, SEND_TO_EMA
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -57,6 +57,7 @@ class MySocketAPI:
         self.port = port
         self.callback = callback
         self.server = None
+        self.serve: bool = True
 
     async def start(self) -> bool:
         """Start listening socket server."""
@@ -64,65 +65,94 @@ class MySocketAPI:
             self.server = await asyncio.start_server(
                 self.data_received, self.host, self.port
             )
+            _LOGGER.debug("Server for port %s started", self.port)
         except OSError as ex:
             _LOGGER.debug("Error starting server - %s", ex)
             return False
 
-    def stop(self):
+    async def stop(self):
         """Stop server."""
+        self.serve = False
         self.server.close()
+        await self.server.wait_closed()
+        _LOGGER.debug("Server for port %s stopped", self.port)
 
     async def data_received(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
     ) -> dict[str, Any]:
         """Decode received message."""
-        ecu = {}
-        while True:
-            _LOGGER.debug("Connected clients: %s", len(self.server.sockets))
-            data = await reader.read(1024)
-            if data == b"":
-                _LOGGER.debug("Client disconnected")
-                return
+
+        _LOGGER.debug("Connected clients: %s", len(self.server.sockets))
+        while self.serve:
             try:
+                ecu = {}
+
+                data = await reader.read(1024)
+                if data == b"":
+                    _LOGGER.debug("Client disconnected")
+                    return
+
                 message = data.decode("utf-8")
-                # process data
-                if message[0:7] == "APS18AA":
-                    # analyse valid data strings by using the checksum and exit when invalid
-                    if int(message[7:10]) != len(message) - 1:
-                        _LOGGER.debug(
-                            "Checksum error - sum: %s, len: %s, %s",
-                            message[7:10],
-                            len(message) - 1,
-                            message,
-                        )
-                    else:
-                        addr = writer.get_extra_info("peername")
-                        _LOGGER.debug("From ECU @%s - %s", addr, message)
-                        # Get ECU data
-                        ecu["timestamp"] = datetime.strptime(
-                            message[60:74], "%Y%m%d%H%M%S"
-                        ).replace(tzinfo=UTC)
 
-                        ecu["ecu-id"] = message[18:30]
-                        ecu["model"] = self.get_model(message[18:22])
-                        ecu["lifetime_energy"] = int(message[42:60]) / 10
-                        ecu["hourly_energy_production"] = 0
-                        ecu["daily_energy_production"] = 0
-                        ecu["lifetime_energy_production"] = 0
-                        ecu["current_power"] = int(message[30:42]) / 100
-                        ecu["qty_of_online_inverters"] = int(message[74:77])
-                        ecu["inverters"] = self.get_inverters(ecu["ecu-id"], message)
+                addr = writer.get_extra_info("peername")
+                _LOGGER.debug(
+                    "From ECU @ %s on port %s - %s", addr[0], self.port, message
+                )
 
-                        # Call callback to send the data
-                        self.callback(ecu)
+                # Send data to EMA and send response from EMA to ECU
+                # SEND_TO_EMA is used to stop sending for testing purposes.
+                if SEND_TO_EMA:
+                    response = await self.send_data_to_ema(self.port, data)
+                    await self.send_data_to_ecu(writer, response)
 
-                response = await self.send_data_to_ema(self.port, data)
-                writer.write(response)
-                await writer.drain()
+                # Process data
 
+                # If not message type we are interested in, do not process.
+                if message[0:7] != "APS18AA":
+                    _LOGGER.debug("Not interested in this message type for processing")
+                    continue
+
+                # Confirm valid message by confirming checksum
+                # If not valid, do not process.
+                if int(message[7:10]) != len(message) - 1:
+                    _LOGGER.debug(
+                        "Checksum error - sum: %s, len: %s",
+                        message[7:10],
+                        len(message) - 1,
+                    )
+                    continue
+
+                # Get ECU data
+                ecu["timestamp"] = datetime.strptime(message[60:74], "%Y%m%d%H%M%S")
+
+                # We can get old messages from the ECU which provide older data to EMA.
+                # We should ignore these if older than 10 mins.
+                if (
+                    message_age := (datetime.now() - ecu["timestamp"]).total_seconds()
+                ) > MESSAGE_IGNORE_AGE:
+                    _LOGGER.debug(
+                        "Message told old, ignoring.  Age is %ss", int(message_age)
+                    )
+                    continue
+
+                ecu["ecu-id"] = message[18:30]
+                ecu["model"] = self.get_model(message[18:22])
+                ecu["lifetime_energy"] = int(message[42:60]) / 10
+                ecu["current_power"] = int(message[30:42]) / 100
+                ecu["qty_of_online_inverters"] = int(message[74:77])
+                ecu["inverters"] = self.get_inverters(ecu["ecu-id"], message)
+
+                # Call callback to send the data
+                self.callback(ecu)
+
+            except ConnectionResetError:
+                _LOGGER.warning("Error: Connection was reset")
             except Exception:
                 _LOGGER.warning("Exception error with %s", traceback.format_exc())
                 return None
+
+        writer.close()
+        await writer.wait_closed()
 
     def get_model(self, model_code: str) -> str:
         """Get model from model code."""
@@ -172,7 +202,7 @@ class MySocketAPI:
                     inverters[inverter.get("uid")] = inverter
         return inverters
 
-    async def send_data_to_ema(self, port: int, data: bytes):
+    async def send_data_to_ema(self, port: int, data: bytes) -> bytes:
         """Send data over async socket."""
         reader, writer = await asyncio.open_connection(EMA_HOST, port)
         writer.write(data)
@@ -180,4 +210,10 @@ class MySocketAPI:
 
         response = await reader.read(1024)
         _LOGGER.debug("From EMA: %s", response)
+        writer.close()
         return response
+
+    async def send_data_to_ecu(self, writer: asyncio.StreamWriter, data: bytes):
+        """Send data to ECU."""
+        writer.write(data)
+        await writer.drain()
