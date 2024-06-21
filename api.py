@@ -20,9 +20,9 @@ ECU_MODELS_216 = {
 
 ECU_MODELS_215 = {"215": "ECU-C"}
 
-
+YC500_MODEL_CODES = ["403", "404"]
 YC600_MODEL_CODES = ["406", "407", "408", "409", "703", "706"]
-QS1_MODEL_CODES = ["801", "802", "806"]
+QS1_MODEL_CODES = ["801", "802", "805", "806"]
 YC1000_MODEL_CODES = ["501", "502", "503", "504"]
 
 POWER_CHANNELS = [63, 83, 103, 123]
@@ -30,6 +30,11 @@ VOLTAGE_CHANNELS = [51, 71, 91, 111]
 CURRENT_CHANNELS = [60, 80, 100, 120]
 
 INVERTER_MODELS = [
+    {
+        "name": "YC500 series",
+        "channels": 2,
+        "model_codes": YC500_MODEL_CODES,
+    },
     {
         "name": "YC600/DS3 series",
         "channels": 2,
@@ -108,19 +113,18 @@ class MySocketAPI:
                 # Process data
 
                 # If not message type we are interested in, do not process.
-                if message[0:7] != "APS18AA":
-                    _LOGGER.debug("Not interested in this message type for processing")
+                prefixes = {"APS18AA": 7,"APS13AAA": 8}
+                if not any(message.startswith(prefix) for prefix in prefixes):
+                    _LOGGER.debug("Received message type from ECU ignored for further processing\n")
                     continue
+                # From valid messages, filter messages if checksum is invalid.
+                for prefix, length in prefixes.items():
+                    if message.startswith(prefix) and int(message[length:10]) != len(message) - 1:
+                        _LOGGER.debug(
+                            "Checksum error - sum: %s, len: %s",
+                            message[length:10], len(message) - 1)
+                        continue
 
-                # Confirm valid message by confirming checksum
-                # If not valid, do not process.
-                if int(message[7:10]) != len(message) - 1:
-                    _LOGGER.debug(
-                        "Checksum error - sum: %s, len: %s",
-                        message[7:10],
-                        len(message) - 1,
-                    )
-                    continue
 
                 # Get ECU data
                 ecu["timestamp"] = datetime.strptime(message[60:74], "%Y%m%d%H%M%S")
