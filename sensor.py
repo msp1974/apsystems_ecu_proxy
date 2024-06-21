@@ -546,16 +546,16 @@ class APSystemsSensor(RestoreSensor, SensorEntity):
                 ).total_seconds(),
                 MAX_STUB_INTERVAL,
             )
-            sum_value = int(value * (new_period_interval / 3600)) / summation_factor
+            sum_value = round(int(value * (new_period_interval / 3600)) / summation_factor, 2)
             _LOGGER.debug(
                 "New summation period - Period interval(s): %i, Value: %f",
                 new_period_interval,
                 sum_value,
             )
         else:
-            sum_value = (
+            sum_value = round((
                 current_value + int(value * (interval / 3600)) / summation_factor
-            )
+            ), 2)
 
             _LOGGER.debug(
                 "Same summation period - Period interval(s): %s, Value: %f",
