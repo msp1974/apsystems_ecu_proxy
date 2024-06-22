@@ -15,7 +15,8 @@ MAX_STUB_INTERVAL = 300
 SEND_TO_EMA = False
 
 ATTR_TIMESTAMP = "timestamp"
-ATTR_SUMATION_PERIOD = "summation_period"
+ATTR_SUMMATION_PERIOD = "summation_period"
+ATTR_SUMMATION_TYPE = "summation_type"
 ATTR_SUMMATION_FACTOR = "summation_factor"
 ATTR_CURRENT_VALUE = "value"
 ATTR_INVERTERS = "inverters"
@@ -44,3 +45,11 @@ class SummationPeriod(StrEnum):
     MONTHLY = "monthly"
     YEARLY = "yearly"
     LIFETIME = "lifetime"
+
+
+class SummationType(StrEnum):
+    """Summation type Enum."""
+
+    SUM = "sum"
+    MAX = "max"
+    MIN = "min"

@@ -32,13 +32,15 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.util import dt as dt_util
 
 from .const import (
-    ATTR_SUMATION_PERIOD,
     ATTR_SUMMATION_FACTOR,
+    ATTR_SUMMATION_PERIOD,
+    ATTR_SUMMATION_TYPE,
     ATTR_TIMESTAMP,
     DOMAIN,
     MAX_STUB_INTERVAL,
     SOLAR_ICON,
     SummationPeriod,
+    SummationType,
 )
 from .helpers import (
     add_local_timezone,
@@ -91,6 +93,7 @@ class APSystemSensorDefinition:
     entity_category: EntityCategory | None = None
     summation_entity: bool = False
     summation_period: SummationPeriod | None = None
+    summation_type: SummationType | None = None
     summation_factor: float = 1
 
 
@@ -111,6 +114,7 @@ ECU_SENSORS: tuple[APSystemSensorDefinition, ...] = (
         unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
         summation_entity=True,
         summation_period=SummationPeriod.HOURLY,
+        summation_type=SummationType.SUM,
         summation_factor=1000,
     ),
     APSystemSensorDefinition(
@@ -122,6 +126,7 @@ ECU_SENSORS: tuple[APSystemSensorDefinition, ...] = (
         unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
         summation_entity=True,
         summation_period=SummationPeriod.DAILY,
+        summation_type=SummationType.SUM,
         summation_factor=1000,
     ),
     APSystemSensorDefinition(
@@ -133,6 +138,7 @@ ECU_SENSORS: tuple[APSystemSensorDefinition, ...] = (
         unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
         summation_entity=True,
         summation_period=SummationPeriod.LIFETIME,
+        summation_type=SummationType.SUM,
         summation_factor=1000,
     ),
     APSystemSensorDefinition(
@@ -142,6 +148,16 @@ ECU_SENSORS: tuple[APSystemSensorDefinition, ...] = (
         device_class=SensorDeviceClass.ENERGY,
         state_class=SensorStateClass.TOTAL_INCREASING,
         unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
+    ),
+    APSystemSensorDefinition(
+        name="Daily Max Power",
+        icon=SOLAR_ICON,
+        parameter="current_power",
+        device_class=SensorDeviceClass.POWER,
+        unit_of_measurement=UnitOfPower.WATT,
+        summation_entity=True,
+        summation_period=SummationPeriod.DAILY,
+        summation_type=SummationType.MAX,
     ),
     APSystemSensorDefinition(
         name="Inverters Online",
@@ -212,7 +228,7 @@ async def async_setup_entry(
             )
             return [device for device in devices if device.id == device_id][0]
         except IndexError:
-            return
+            return None
 
     def restore_sensors():
         """Restore all previsouly registered sensors."""
@@ -378,7 +394,7 @@ class APSystemsSensor(RestoreSensor, SensorEntity):
         """Is this a summation sensor."""
         return (
             hasattr(self, "_attr_extra_state_attributes")
-            and self._attr_extra_state_attributes.get(ATTR_SUMATION_PERIOD)
+            and self._attr_extra_state_attributes.get(ATTR_SUMMATION_PERIOD)
         ) or self._definition.summation_entity
 
     async def async_added_to_hass(self) -> None:
@@ -413,20 +429,25 @@ class APSystemsSensor(RestoreSensor, SensorEntity):
             if state_data.native_value is not None:
                 self._attr_native_value = state_data.native_value
 
-        _LOGGER.debug(
-            "Restored state for %s of %s with native uom %s and uom %s",
-            self.entity_id,
-            state_data.native_value,
-            state_data.native_unit_of_measurement,
-            self._attr_unit_of_measurement,
-        )
+            _LOGGER.debug(
+                "Restored state for %s of %s with native uom %s and uom %s",
+                self.entity_id,
+                state_data.native_value,
+                state_data.native_unit_of_measurement,
+                self._attr_unit_of_measurement,
+            )
 
     def set_initial_value(self):
         """Set initial values on sensor creation."""
         if self._config.initial_value is not None:
             if self._definition.summation_entity:
-                self.native_value = 0
                 self.set_summation_entity_attributes()
+
+                if self._definition.summation_type == SummationType.SUM:
+                    self.native_value = 0
+                else:
+                    self.native_value = self._config.initial_value.data
+
             elif (
                 self._definition.device_class == SensorDeviceClass.TIMESTAMP
                 and isinstance(self._config.initial_value.data, datetime)
@@ -441,7 +462,8 @@ class APSystemsSensor(RestoreSensor, SensorEntity):
     def set_summation_entity_attributes(self):
         """Set initial base attribute values."""
         self._attr_extra_state_attributes = {
-            ATTR_SUMATION_PERIOD: self._definition.summation_period,
+            ATTR_SUMMATION_PERIOD: self._definition.summation_period,
+            ATTR_SUMMATION_TYPE: self._definition.summation_type,
             ATTR_SUMMATION_FACTOR: self._definition.summation_factor,
             ATTR_TIMESTAMP: self._config.initial_value.attributes.get(ATTR_TIMESTAMP),
         }
@@ -462,8 +484,9 @@ class APSystemsSensor(RestoreSensor, SensorEntity):
         # so check.
         if self.is_summation_sensor:
             summation_period = self._attr_extra_state_attributes.get(
-                ATTR_SUMATION_PERIOD
+                ATTR_SUMMATION_PERIOD
             )
+            summation_type = self._attr_extra_state_attributes.get(ATTR_SUMMATION_TYPE)
             summation_factor = self._attr_extra_state_attributes.get(
                 ATTR_SUMMATION_FACTOR
             )
@@ -474,8 +497,9 @@ class APSystemsSensor(RestoreSensor, SensorEntity):
             if not isinstance(last_timestamp, datetime):
                 last_timestamp = dt_util.parse_datetime(last_timestamp)
 
-            update_value = self.summation_calculation(
+            update_value, has_changed = self.summation_calculation(
                 summation_period,
+                summation_type,
                 summation_factor,
                 last_timestamp,
                 current_timestamp,
@@ -483,8 +507,10 @@ class APSystemsSensor(RestoreSensor, SensorEntity):
                 update_value,
             )
 
-            # Update attributes
-            self.update_attributes({ATTR_TIMESTAMP: current_timestamp})
+            # Set timestamp if value changed
+            # To only update on min/max summation sensor if changed
+            if has_changed:
+                self.update_attributes({ATTR_TIMESTAMP: current_timestamp})
 
         # Prevent updating total increasing sensors (ie historical energy sensors)
         # with lower values.
@@ -512,6 +538,7 @@ class APSystemsSensor(RestoreSensor, SensorEntity):
     def summation_calculation(
         self,
         summation_period: SummationPeriod,
+        summation_type: SummationType,
         summation_factor: float,
         last_timestamp: datetime,
         current_timestamp: datetime,
@@ -536,26 +563,54 @@ class APSystemsSensor(RestoreSensor, SensorEntity):
             value,
         )
 
+        sum_value = None
+        has_changed = False
+
         # Has it crossed calculation period boundry?
         if has_changed_period(summation_period, last_timestamp, current_timestamp):
-            # Calculate portion of current value to set as start value
-            new_period_interval = max(
-                (
-                    current_timestamp
-                    - get_period_start_timestamp(summation_period, current_timestamp)
-                ).total_seconds(),
-                MAX_STUB_INTERVAL,
-            )
-            sum_value = round(int(value * (new_period_interval / 3600)) / summation_factor, 2)
-            _LOGGER.debug(
-                "New summation period - Period interval(s): %i, Value: %f",
-                new_period_interval,
-                sum_value,
-            )
+            # Set to last recorded value if new recording period
+            has_changed = True
+            if summation_type in [SummationType.MAX, SummationType.MIN]:
+                sum_value = value
+                _LOGGER.debug(
+                    "New summation period - Value: %f",
+                    sum_value,
+                )
+            elif summation_type == SummationType.SUM:
+                # Calculate portion of current value to set as start value
+                new_period_interval = max(
+                    (
+                        current_timestamp
+                        - get_period_start_timestamp(
+                            summation_period, current_timestamp
+                        )
+                    ).total_seconds(),
+                    MAX_STUB_INTERVAL,
+                )
+                sum_value = round(
+                    int(value * (new_period_interval / 3600)) / summation_factor, 2
+                )
+                _LOGGER.debug(
+                    "New summation period - Period interval(s): %i, Value: %f",
+                    new_period_interval,
+                    sum_value,
+                )
         else:
-            sum_value = round((
-                current_value + int(value * (interval / 3600)) / summation_factor
-            ), 2)
+            sum_value = current_value
+            if (
+                summation_type == SummationType.MAX
+                and value >= current_value
+                or summation_type == SummationType.MIN
+                and value <= current_value
+            ):
+                sum_value = value
+                has_changed = True
+            elif summation_type == SummationType.SUM:
+                has_changed = True
+                sum_value = round(
+                    (current_value + int(value * (interval / 3600)) / summation_factor),
+                    2,
+                )
 
             _LOGGER.debug(
                 "Same summation period - Period interval(s): %s, Value: %f",
@@ -563,4 +618,4 @@ class APSystemsSensor(RestoreSensor, SensorEntity):
                 sum_value,
             )
 
-        return sum_value
+        return sum_value, has_changed
